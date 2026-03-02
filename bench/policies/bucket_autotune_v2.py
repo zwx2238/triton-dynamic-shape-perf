@@ -5,7 +5,7 @@ import time
 from typing import Dict, Optional, Sequence, Tuple
 
 from bench.configs.base_configs import MatmulConfig, get_default_config
-from bench.policies.common import BudgetTracker, EvaluatorFn, Metrics, SelectionResult
+from bench.policies.common import BudgetTracker, EvaluatorFn, Metrics, SelectionResult, autotune_best
 
 Shape = Tuple[int, int, int]
 BucketKeyV2 = Tuple[int, int, int, int]
@@ -76,12 +76,21 @@ class BucketAutotuneV2Policy:
         use_anchor: bool = True,
         anchor_alpha: float = 0.3,
         anchor_top_k: int = 4,
+        llm_specialization: bool = True,
+        llm_candidates: Optional[Sequence[MatmulConfig]] = None,
     ) -> None:
         self.candidates = list(candidates)
         self.use_anchor = use_anchor
         self.anchor_alpha = max(0.0, min(anchor_alpha, 1.0))
         self.anchor_top_k = max(1, int(anchor_top_k))
         self.cache: Dict[BucketKeyV2, MatmulConfig] = {}
+        self.llm_specialization = llm_specialization
+        self.llm_candidates = list(llm_candidates) if llm_candidates is not None else list(candidates)
+        self.llm_cache: Dict[Shape, MatmulConfig] = {}
+
+    def _is_llm_style_shape(self, shape: Shape) -> bool:
+        m, n, k = shape
+        return m <= 64 and n >= 1024 and k >= 1024
 
     def _is_extreme_shape(self, shape: Shape) -> bool:
         m, n, _ = shape
@@ -91,6 +100,27 @@ class BucketAutotuneV2Policy:
         return mn_min <= 8 or ratio >= 8.0
 
     def select(self, shape: Shape, evaluator: EvaluatorFn, budget: BudgetTracker) -> SelectionResult:
+        if self.llm_specialization and self._is_llm_style_shape(shape):
+            if shape in self.llm_cache:
+                m, n, k = shape
+                return SelectionResult(config=self.llm_cache[shape], cache_key=f"llm_{m}_{n}_{k}")
+
+            t0 = time.perf_counter()
+            best_cfg, best_metrics, notes = autotune_best(shape, self.llm_candidates, evaluator, budget)
+            self.llm_cache[shape] = best_cfg
+            tune_time_ms = (time.perf_counter() - t0) * 1000.0
+            m, n, k = shape
+            ext_notes = "llm_specialized"
+            if notes:
+                ext_notes = f"{ext_notes};{notes}"
+            return SelectionResult(
+                config=best_cfg,
+                cache_key=f"llm_{m}_{n}_{k}",
+                tune_time_ms=tune_time_ms,
+                premeasure=best_metrics,
+                notes=ext_notes,
+            )
+
         key = bucket_key_v2(*shape)
         key_str = bucket_key_v2_to_str(key)
         if key in self.cache:

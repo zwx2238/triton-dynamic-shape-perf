@@ -24,6 +24,10 @@ ALL_METHODS = ["A", "B", "B2", "C", "D", "F", "U"]
 ALL_WORKLOADS = ["uniform", "llm_style", "training_style", "adversarial"]
 
 
+def _parse_config_id_list(text: str) -> List[str]:
+    return [x.strip() for x in text.split(",") if x.strip()]
+
+
 def _shape_id(workload: str, split: str, idx: int) -> str:
     return f"{workload}_{split}_{idx:03d}"
 
@@ -180,11 +184,17 @@ def _run_method_a_or_b(
     elif method == "B":
         policy = BucketAutotunePolicy(BASE_CONFIGS, method="B")
     elif method == "B2":
+        llm_ids = _parse_config_id_list(args.b2_llm_candidates)
+        llm_cfgs = [CONFIG_MAP[cid] for cid in llm_ids if cid in CONFIG_MAP]
+        if not llm_cfgs:
+            llm_cfgs = BASE_CONFIGS
         policy = BucketAutotuneV2Policy(
             BASE_CONFIGS,
             use_anchor=not args.b2_disable_anchor,
             anchor_alpha=args.b2_anchor_alpha,
             anchor_top_k=args.b2_anchor_top_k,
+            llm_specialization=not args.b2_disable_llm_specialization,
+            llm_candidates=llm_cfgs,
         )
     else:
         raise ValueError(method)
@@ -381,6 +391,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4,
         help="B2 仅对当前 shape 前 K 名候选做 anchor 校正",
+    )
+    parser.add_argument(
+        "--b2-disable-llm-specialization",
+        action="store_true",
+        help="关闭 B2 的 llm_style 形状专项通道",
+    )
+    parser.add_argument(
+        "--b2-llm-candidates",
+        type=str,
+        default="c11,c00,c04,c02,c10,c01",
+        help="B2 llm 专项通道候选 config 列表，逗号分隔",
     )
     parser.add_argument(
         "--unoptimized-ref-shape",
