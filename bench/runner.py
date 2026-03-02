@@ -10,6 +10,7 @@ from bench.configs.searched_configs import save_searched_configs
 from bench.csv_logger import append_records, reset_csv
 from bench.kernels.triton_matmul import TritonMatmulEvaluator
 from bench.policies.bucket_autotune import BucketAutotunePolicy
+from bench.policies.bucket_autotune_v2 import BucketAutotuneV2Policy
 from bench.policies.buckets import bucket_key
 from bench.policies.common import BudgetTracker, SelectionResult
 from bench.policies.fixed_static import FixedStaticPolicy, pick_fixed_config_from_reference
@@ -19,7 +20,7 @@ from bench.policies.offline_table import OfflineTablePolicy, build_offline_table
 from bench.policies.script_search import search_top_configs_for_workload
 from bench.workloads.synthetic import Shape, WorkloadSplits, build_synthetic_workloads
 
-ALL_METHODS = ["A", "B", "C", "D", "F", "U"]
+ALL_METHODS = ["A", "B", "B2", "C", "D", "F", "U"]
 ALL_WORKLOADS = ["uniform", "llm_style", "training_style", "adversarial"]
 
 
@@ -178,6 +179,13 @@ def _run_method_a_or_b(
         policy = FullAutotunePolicy(BASE_CONFIGS)
     elif method == "B":
         policy = BucketAutotunePolicy(BASE_CONFIGS, method="B")
+    elif method == "B2":
+        policy = BucketAutotuneV2Policy(
+            BASE_CONFIGS,
+            use_anchor=not args.b2_disable_anchor,
+            anchor_alpha=args.b2_anchor_alpha,
+            anchor_top_k=args.b2_anchor_top_k,
+        )
     else:
         raise ValueError(method)
 
@@ -185,10 +193,7 @@ def _run_method_a_or_b(
 
     for workload in workload_order:
         for split in ["tune", "eval"]:
-            if method == "A":
-                select_fn = lambda shape: policy.select(shape, evaluator.evaluate, budget)
-            else:
-                select_fn = lambda shape: policy.select(shape, evaluator.evaluate, budget)
+            select_fn = lambda shape: policy.select(shape, evaluator.evaluate, budget)
 
             rows += _run_shapes(
                 method=method,
@@ -361,6 +366,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-eval-shapes", type=int, default=64)
     parser.add_argument("--max-probe-shapes", type=int, default=8)
     parser.add_argument(
+        "--b2-disable-anchor",
+        action="store_true",
+        help="关闭 B2 的 representative-anchor 联合评分，仅用当前 shape 评分",
+    )
+    parser.add_argument(
+        "--b2-anchor-alpha",
+        type=float,
+        default=0.1,
+        help="B2 anchor 评分权重，范围 [0,1]，值越大越依赖 representative shape",
+    )
+    parser.add_argument(
+        "--b2-anchor-top-k",
+        type=int,
+        default=4,
+        help="B2 仅对当前 shape 前 K 名候选做 anchor 校正",
+    )
+    parser.add_argument(
         "--unoptimized-ref-shape",
         nargs=3,
         type=int,
@@ -402,7 +424,7 @@ def main() -> None:
 
         if method == "C":
             rows = _run_method_c(workloads, args.workloads, evaluator, method_budget, args)
-        elif method in {"A", "B"}:
+        elif method in {"A", "B", "B2"}:
             rows = _run_method_a_or_b(method, workloads, args.workloads, evaluator, method_budget, args)
         elif method == "D":
             rows = _run_method_d(workloads, args.workloads, evaluator, method_budget, args)
