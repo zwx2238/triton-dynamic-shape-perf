@@ -420,7 +420,12 @@ def main() -> None:
     if args.reset_results:
         reset_csv(args.results_csv)
 
-    workloads = build_synthetic_workloads(seed=20260302)
+    workloads = build_synthetic_workloads(
+        seed=20260302,
+        tune_count=args.max_tune_shapes,
+        eval_count=args.max_eval_shapes,
+        probe_count=args.max_probe_shapes,
+    )
     for name in list(workloads.keys()):
         workloads[name] = _trim_splits(
             workloads[name],

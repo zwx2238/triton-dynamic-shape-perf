@@ -24,8 +24,19 @@ def _sample_unique(
         seen.add(shape)
         out.append(shape)
     if len(out) < count:
-        raise RuntimeError(f"无法生成足够唯一 shape: 需要 {count}, 实际 {len(out)}")
+        # 当唯一组合空间不足时，补齐剩余样本（允许重复），保证总样本规模可控。
+        missing = count - len(out)
+        for _ in range(missing):
+            out.append(sampler())
     return out
+
+
+def _sample_with_replacement(
+    rng: random.Random,
+    count: int,
+    sampler: Callable[[], Shape],
+) -> List[Shape]:
+    return [sampler() for _ in range(count)]
 
 
 def _pick_probe(eval_shapes: List[Shape], n: int = 8) -> List[Shape]:
@@ -56,7 +67,8 @@ def _uniform_shapes(rng: random.Random, count: int) -> List[Shape]:
 
 def _llm_style_shapes(rng: random.Random, count: int) -> List[Shape]:
     m_choices = [1, 2, 4, 8, 16, 32, 64]
-    nk_choices = [1024, 2048, 4096, 8192]
+    # 扩展 nk 取值，确保可以支持更大的 eval 集（例如 256）
+    nk_choices = [1024, 1536, 2048, 3072, 4096, 6144, 8192]
 
     def sampler() -> Shape:
         return (rng.choice(m_choices), rng.choice(nk_choices), rng.choice(nk_choices))
@@ -118,26 +130,51 @@ def _adversarial_eval_shapes() -> List[Shape]:
 
 def _build_single_workload(
     seed: int,
-    name: str,
     generator: Callable[[random.Random, int], List[Shape]],
+    tune_count: int,
+    eval_count: int,
+    probe_count: int,
 ) -> WorkloadSplits:
     rng_tune = random.Random(seed)
     rng_eval = random.Random(seed + 1)
-    tune = generator(rng_tune, 32)
-    eval_set = generator(rng_eval, 64)
-    probe = _pick_probe(eval_set, 8)
+    tune = generator(rng_tune, tune_count)
+    eval_set = generator(rng_eval, eval_count)
+    probe = _pick_probe(eval_set, probe_count)
     return {"tune": tune, "eval": eval_set, "probe": probe}
 
 
-def build_synthetic_workloads(seed: int = 20260302) -> Dict[str, WorkloadSplits]:
+def _expand_to_count(base: List[Shape], count: int) -> List[Shape]:
+    if count <= len(base):
+        return base[:count]
+    out: List[Shape] = []
+    i = 0
+    while len(out) < count:
+        out.append(base[i % len(base)])
+        i += 1
+    return out
+
+
+def build_synthetic_workloads(
+    seed: int = 20260302,
+    tune_count: int = 32,
+    eval_count: int = 64,
+    probe_count: int = 8,
+) -> Dict[str, WorkloadSplits]:
     workloads: Dict[str, WorkloadSplits] = {}
-    workloads["uniform"] = _build_single_workload(seed + 11, "uniform", _uniform_shapes)
-    workloads["llm_style"] = _build_single_workload(seed + 23, "llm_style", _llm_style_shapes)
-    workloads["training_style"] = _build_single_workload(seed + 37, "training_style", _training_style_shapes)
+    workloads["uniform"] = _build_single_workload(
+        seed + 11, _uniform_shapes, tune_count=tune_count, eval_count=eval_count, probe_count=probe_count
+    )
+    workloads["llm_style"] = _build_single_workload(
+        seed + 23, _llm_style_shapes, tune_count=tune_count, eval_count=eval_count, probe_count=probe_count
+    )
+    workloads["training_style"] = _build_single_workload(
+        seed + 37, _training_style_shapes, tune_count=tune_count, eval_count=eval_count, probe_count=probe_count
+    )
 
     adversarial_eval = _adversarial_eval_shapes()
-    adversarial_tune = adversarial_eval[:32]
-    adversarial_probe = _pick_probe(adversarial_eval, 8)
+    adversarial_tune = _expand_to_count(adversarial_eval[:32], tune_count)
+    adversarial_eval = _expand_to_count(adversarial_eval, eval_count)
+    adversarial_probe = _pick_probe(adversarial_eval, probe_count)
     workloads["adversarial"] = {
         "tune": adversarial_tune,
         "eval": adversarial_eval,
