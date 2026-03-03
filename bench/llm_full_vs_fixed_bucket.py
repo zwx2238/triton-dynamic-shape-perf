@@ -8,7 +8,7 @@ import statistics
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from bench.configs.base_configs import BASE_CONFIGS, CONFIG_MAP, MatmulConfig
 from bench.csv_logger import append_records, reset_csv
@@ -248,6 +248,7 @@ def _make_torch_record(
     metrics: Dict[str, object],
     dtype: str,
     gpu: str,
+    config_id: str,
     m_split: int,
     n_split: int,
     k_split: int,
@@ -267,7 +268,7 @@ def _make_torch_record(
         "K": K,
         "dtype": dtype,
         "gpu": gpu,
-        "config_id": "torch_cublas",
+        "config_id": config_id,
         "BLOCK_M": -1,
         "BLOCK_N": -1,
         "BLOCK_K": -1,
@@ -282,7 +283,7 @@ def _make_torch_record(
         "bucket_m": int(key),
         "bucket_n": -1,
         "bucket_k": -1,
-        "cache_key": "torch_mm",
+        "cache_key": config_id,
         "invalid_config": int(metrics.get("invalid_config", 0)),
         "notes": metric_note,
     }
@@ -290,7 +291,7 @@ def _make_torch_record(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="llm_style benchmark: FULL/BUCKET (Triton) + TORCH(cuBLAS) + ONEKEY(1-key tuned baseline)"
+        description="llm_style benchmark: FULL/BUCKET/ONEKEY(Triton) + TORCH(torch.mm)"
     )
     parser.add_argument(
         "--methods",
@@ -304,7 +305,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260302)
     parser.add_argument("--budget-seconds", type=float, default=300.0)
     parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--device", type=str, default="auto", help="auto / cuda[:id] / npu[:id]")
+    parser.add_argument(
+        "--npu-timing",
+        type=str,
+        default="profiler_eval",
+        choices=["event", "profiler_eval", "profiler_all"],
+        help="NPU 计时方式: event / profiler_eval(仅 eval 用 profiler) / profiler_all",
+    )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeat", type=int, default=50)
     parser.add_argument("--bucket-m-split", type=int, default=DEFAULT_M_SPLIT)
@@ -342,31 +350,86 @@ def main() -> None:
         reset_csv(args.results_csv)
     Path(args.results_csv).parent.mkdir(parents=True, exist_ok=True)
 
-    triton_evaluator = TritonMatmulEvaluator(
-        dtype=args.dtype,
-        device=args.device,
-        warmup=args.warmup,
-        repeat=args.repeat,
-    )
-    torch_evaluator = TorchMatmulEvaluator(
-        dtype=args.dtype,
-        device=args.device,
-        warmup=args.warmup,
-        repeat=args.repeat,
-    )
-    gpu = triton_evaluator.get_gpu_name()
+    need_triton = any(method in {"FULL", "BUCKET", "ONEKEY"} for method in args.methods)
+    need_torch = "TORCH" in args.methods
+
+    triton_evaluator: Optional[TritonMatmulEvaluator] = None
+    torch_evaluator: Optional[TorchMatmulEvaluator] = None
+
+    if need_triton:
+        triton_evaluator = TritonMatmulEvaluator(
+            dtype=args.dtype,
+            device=args.device,
+            warmup=args.warmup,
+            repeat=args.repeat,
+            npu_timing="event",
+        )
+
+    if need_torch:
+        torch_evaluator = TorchMatmulEvaluator(
+            dtype=args.dtype,
+            device=args.device,
+            warmup=args.warmup,
+            repeat=args.repeat,
+            npu_timing="event",
+        )
+
+    if triton_evaluator is not None:
+        gpu = triton_evaluator.get_gpu_name()
+    elif torch_evaluator is not None:
+        gpu = torch_evaluator.get_gpu_name()
+    else:
+        raise RuntimeError("methods 为空，至少需要一个方法")
+
+    device_type = triton_evaluator.device.type if triton_evaluator is not None else torch_evaluator.device.type
+    if device_type == "npu":
+        if args.npu_timing == "event":
+            tune_timing_mode = "event"
+            eval_timing_mode = "event"
+        elif args.npu_timing == "profiler_all":
+            tune_timing_mode = "profiler"
+            eval_timing_mode = "profiler"
+        else:
+            tune_timing_mode = "event"
+            eval_timing_mode = "profiler"
+    else:
+        tune_timing_mode = "event"
+        eval_timing_mode = "event"
+    use_profiler_batch_eval = device_type == "npu" and eval_timing_mode == "profiler"
+
+    def triton_eval_tune(shape: Shape, cfg: MatmulConfig) -> Dict[str, object]:
+        if triton_evaluator is None:
+            raise RuntimeError("内部错误：缺少 triton evaluator")
+        return triton_evaluator.evaluate(shape, cfg, timing_mode=tune_timing_mode)
+
+    def triton_eval_runtime(shape: Shape, cfg: MatmulConfig) -> Dict[str, object]:
+        if triton_evaluator is None:
+            raise RuntimeError("内部错误：缺少 triton evaluator")
+        return triton_evaluator.evaluate(shape, cfg, timing_mode=eval_timing_mode)
+
+    def torch_eval_tune(shape: Shape) -> Dict[str, object]:
+        if torch_evaluator is None:
+            raise RuntimeError("内部错误：缺少 torch evaluator")
+        return torch_evaluator.evaluate(shape, timing_mode=tune_timing_mode)
+
+    def torch_eval_runtime(shape: Shape) -> Dict[str, object]:
+        if torch_evaluator is None:
+            raise RuntimeError("内部错误：缺少 torch evaluator")
+        return torch_evaluator.evaluate(shape, timing_mode=eval_timing_mode)
 
     for method in args.methods:
         budget = BudgetTracker(args.budget_seconds)
         rows: List[Dict[str, object]] = []
 
         if method == "FULL":
+            if triton_evaluator is None:
+                raise RuntimeError("内部错误：FULL 需要 Triton evaluator")
             policy = FullAutotunePolicy(candidates)
             for i, shape in enumerate(tune_set):
                 if budget.exceeded():
                     break
-                sel = policy.select(shape, triton_evaluator.evaluate, budget)
-                met = sel.premeasure if sel.premeasure is not None else triton_evaluator.evaluate(shape, sel.config)
+                sel = policy.select(shape, triton_eval_tune, budget)
+                met = sel.premeasure if sel.premeasure is not None else triton_eval_tune(shape, sel.config)
                 rows.append(
                     _make_record(
                         "FULL",
@@ -385,23 +448,56 @@ def main() -> None:
             for i, shape in enumerate(eval_set):
                 if budget.exceeded():
                     break
-                sel = policy.select(shape, triton_evaluator.evaluate, budget)
-                met = sel.premeasure if sel.premeasure is not None else triton_evaluator.evaluate(shape, sel.config)
-                rows.append(
-                    _make_record(
-                        "FULL",
-                        "eval",
-                        i,
-                        shape,
-                        sel,
-                        met,
-                        args.dtype,
-                        gpu,
-                        args.bucket_m_split,
-                        args.bucket_n_split,
-                        args.bucket_k_split,
+                sel = policy.select(shape, triton_eval_tune, budget)
+                if use_profiler_batch_eval:
+                    rows.append(
+                        _make_record(
+                            "FULL",
+                            "eval",
+                            i,
+                            shape,
+                            sel,
+                            {},
+                            args.dtype,
+                            gpu,
+                            args.bucket_m_split,
+                            args.bucket_n_split,
+                            args.bucket_k_split,
+                        )
                     )
-                )
+                else:
+                    met = triton_eval_runtime(shape, sel.config)
+                    rows.append(
+                        _make_record(
+                            "FULL",
+                            "eval",
+                            i,
+                            shape,
+                            sel,
+                            met,
+                            args.dtype,
+                            gpu,
+                            args.bucket_m_split,
+                            args.bucket_n_split,
+                            args.bucket_k_split,
+                        )
+                    )
+
+            if use_profiler_batch_eval:
+                eval_rows = [r for r in rows if r["split"] == "eval"]
+                eval_entries = [((int(r["M"]), int(r["N"]), int(r["K"])), CONFIG_MAP[str(r["config_id"])]) for r in eval_rows]
+                eval_metrics = triton_evaluator.evaluate_batch(eval_entries, timing_mode=eval_timing_mode)
+                for row, met in zip(eval_rows, eval_metrics):
+                    row.update(
+                        {
+                            "compile_time_ms": float(met.get("compile_time_ms", 0.0)),
+                            "runtime_cost_us": float(met.get("runtime_cost_us", 0.0)),
+                            "p99_us": float(met.get("p99_us", 0.0)),
+                            "runtime_perf_tflops": float(met.get("runtime_perf_tflops", 0.0)),
+                            "invalid_config": int(met.get("invalid_config", 0)),
+                            "notes": ";".join([x for x in [str(row.get("notes", "")), str(met.get("notes", ""))] if x]),
+                        }
+                    )
             append_records(args.results_csv, rows)
             print(
                 f"[method=FULL] rows={len(rows)} elapsed_s={budget.elapsed_seconds():.2f} "
@@ -410,6 +506,8 @@ def main() -> None:
             continue
 
         if method == "BUCKET":
+            if triton_evaluator is None:
+                raise RuntimeError("内部错误：BUCKET 需要 Triton evaluator")
             policy = LlmBucket8AutotunePolicy(
                 candidates,
                 m_split=args.bucket_m_split,
@@ -420,8 +518,8 @@ def main() -> None:
             for i, shape in enumerate(tune_set):
                 if budget.exceeded():
                     break
-                sel = policy.select(shape, triton_evaluator.evaluate, budget)
-                met = sel.premeasure if sel.premeasure is not None else triton_evaluator.evaluate(shape, sel.config)
+                sel = policy.select(shape, triton_eval_tune, budget)
+                met = sel.premeasure if sel.premeasure is not None else triton_eval_tune(shape, sel.config)
                 rows.append(
                     _make_record(
                         "BUCKET",
@@ -448,25 +546,58 @@ def main() -> None:
             for i, shape in enumerate(eval_set):
                 if budget.exceeded():
                     break
-                sel = policy.select(shape, triton_evaluator.evaluate, budget)
+                sel = policy.select(shape, triton_eval_tune, budget)
                 if sel.tune_time_ms > 0:
                     raise RuntimeError("BUG: bucket policy 在 eval 阶段发生了调参")
-                met = triton_evaluator.evaluate(shape, sel.config)
-                rows.append(
-                    _make_record(
-                        "BUCKET",
-                        "eval",
-                        i,
-                        shape,
-                        sel,
-                        met,
-                        args.dtype,
-                        gpu,
-                        args.bucket_m_split,
-                        args.bucket_n_split,
-                        args.bucket_k_split,
+                if use_profiler_batch_eval:
+                    rows.append(
+                        _make_record(
+                            "BUCKET",
+                            "eval",
+                            i,
+                            shape,
+                            sel,
+                            {},
+                            args.dtype,
+                            gpu,
+                            args.bucket_m_split,
+                            args.bucket_n_split,
+                            args.bucket_k_split,
+                        )
                     )
-                )
+                else:
+                    met = triton_eval_runtime(shape, sel.config)
+                    rows.append(
+                        _make_record(
+                            "BUCKET",
+                            "eval",
+                            i,
+                            shape,
+                            sel,
+                            met,
+                            args.dtype,
+                            gpu,
+                            args.bucket_m_split,
+                            args.bucket_n_split,
+                            args.bucket_k_split,
+                        )
+                    )
+
+            if use_profiler_batch_eval:
+                eval_rows = [r for r in rows if r["split"] == "eval"]
+                eval_entries = [((int(r["M"]), int(r["N"]), int(r["K"])), CONFIG_MAP[str(r["config_id"])]) for r in eval_rows]
+                eval_metrics = triton_evaluator.evaluate_batch(eval_entries, timing_mode=eval_timing_mode)
+                for row, met in zip(eval_rows, eval_metrics):
+                    row.update(
+                        {
+                            "compile_time_ms": float(met.get("compile_time_ms", 0.0)),
+                            "runtime_cost_us": float(met.get("runtime_cost_us", 0.0)),
+                            "p99_us": float(met.get("p99_us", 0.0)),
+                            "runtime_perf_tflops": float(met.get("runtime_perf_tflops", 0.0)),
+                            "invalid_config": int(met.get("invalid_config", 0)),
+                            "notes": ";".join([x for x in [str(row.get("notes", "")), str(met.get("notes", ""))] if x]),
+                        }
+                    )
 
             append_records(args.results_csv, rows)
             print(
@@ -477,10 +608,13 @@ def main() -> None:
             continue
 
         if method == "TORCH":
+            if torch_evaluator is None:
+                raise RuntimeError("内部错误：TORCH 需要 Torch evaluator")
+            torch_cfg = torch_evaluator.get_torch_config_id()
             for i, shape in enumerate(tune_set):
                 if budget.exceeded():
                     break
-                met = torch_evaluator.evaluate(shape)
+                met = torch_eval_tune(shape)
                 rows.append(
                     _make_torch_record(
                         "tune",
@@ -489,29 +623,54 @@ def main() -> None:
                         met,
                         args.dtype,
                         gpu,
+                        torch_cfg,
                         args.bucket_m_split,
                         args.bucket_n_split,
                         args.bucket_k_split,
                     )
                 )
 
+            eval_items: List[tuple[int, Shape]] = []
             for i, shape in enumerate(eval_set):
                 if budget.exceeded():
                     break
-                met = torch_evaluator.evaluate(shape)
-                rows.append(
-                    _make_torch_record(
-                        "eval",
-                        i,
-                        shape,
-                        met,
-                        args.dtype,
-                        gpu,
-                        args.bucket_m_split,
-                        args.bucket_n_split,
-                        args.bucket_k_split,
+                if use_profiler_batch_eval:
+                    eval_items.append((i, shape))
+                else:
+                    met = torch_eval_runtime(shape)
+                    rows.append(
+                        _make_torch_record(
+                            "eval",
+                            i,
+                            shape,
+                            met,
+                            args.dtype,
+                            gpu,
+                            torch_cfg,
+                            args.bucket_m_split,
+                            args.bucket_n_split,
+                            args.bucket_k_split,
+                        )
                     )
-                )
+
+            if use_profiler_batch_eval and eval_items:
+                eval_shapes = [shape for _, shape in eval_items]
+                eval_metrics = torch_evaluator.evaluate_batch(eval_shapes, timing_mode=eval_timing_mode)
+                for (i, shape), met in zip(eval_items, eval_metrics):
+                    rows.append(
+                        _make_torch_record(
+                            "eval",
+                            i,
+                            shape,
+                            met,
+                            args.dtype,
+                            gpu,
+                            torch_cfg,
+                            args.bucket_m_split,
+                            args.bucket_n_split,
+                            args.bucket_k_split,
+                        )
+                    )
 
             append_records(args.results_csv, rows)
             print(
@@ -521,12 +680,14 @@ def main() -> None:
             continue
 
         if method == "ONEKEY":
+            if triton_evaluator is None:
+                raise RuntimeError("内部错误：ONEKEY 需要 Triton evaluator")
             rep_shape = _pick_representative_shape(tune_set)
             t0 = time.perf_counter()
-            best_cfg, best_metrics, notes = autotune_best(rep_shape, candidates, triton_evaluator.evaluate, budget)
+            best_cfg, best_metrics, notes = autotune_best(rep_shape, candidates, triton_eval_tune, budget)
             rep_tune_ms = (time.perf_counter() - t0) * 1000.0
             if best_metrics is None:
-                best_metrics = triton_evaluator.evaluate(rep_shape, best_cfg)
+                best_metrics = triton_eval_tune(rep_shape, best_cfg)
 
             rep_cache_key = f"onekey:{rep_shape[0]}x{rep_shape[1]}x{rep_shape[2]}"
             rep_notes = f"onekey_rep_shape={rep_shape[0]}x{rep_shape[1]}x{rep_shape[2]}"
@@ -554,7 +715,7 @@ def main() -> None:
                         tune_time_ms=0.0,
                         notes=rep_notes,
                     )
-                    met = triton_evaluator.evaluate(shape, best_cfg)
+                    met = triton_eval_tune(shape, best_cfg)
 
                 rows.append(
                     _make_record(
@@ -581,22 +742,55 @@ def main() -> None:
                     tune_time_ms=0.0,
                     notes=rep_notes,
                 )
-                met = triton_evaluator.evaluate(shape, best_cfg)
-                rows.append(
-                    _make_record(
-                        "ONEKEY",
-                        "eval",
-                        i,
-                        shape,
-                        sel,
-                        met,
-                        args.dtype,
-                        gpu,
-                        args.bucket_m_split,
-                        args.bucket_n_split,
-                        args.bucket_k_split,
+                if use_profiler_batch_eval:
+                    rows.append(
+                        _make_record(
+                            "ONEKEY",
+                            "eval",
+                            i,
+                            shape,
+                            sel,
+                            {},
+                            args.dtype,
+                            gpu,
+                            args.bucket_m_split,
+                            args.bucket_n_split,
+                            args.bucket_k_split,
+                        )
                     )
-                )
+                else:
+                    met = triton_eval_runtime(shape, best_cfg)
+                    rows.append(
+                        _make_record(
+                            "ONEKEY",
+                            "eval",
+                            i,
+                            shape,
+                            sel,
+                            met,
+                            args.dtype,
+                            gpu,
+                            args.bucket_m_split,
+                            args.bucket_n_split,
+                            args.bucket_k_split,
+                        )
+                    )
+
+            if use_profiler_batch_eval:
+                eval_rows = [r for r in rows if r["split"] == "eval"]
+                eval_entries = [((int(r["M"]), int(r["N"]), int(r["K"])), CONFIG_MAP[str(r["config_id"])]) for r in eval_rows]
+                eval_metrics = triton_evaluator.evaluate_batch(eval_entries, timing_mode=eval_timing_mode)
+                for row, met in zip(eval_rows, eval_metrics):
+                    row.update(
+                        {
+                            "compile_time_ms": float(met.get("compile_time_ms", 0.0)),
+                            "runtime_cost_us": float(met.get("runtime_cost_us", 0.0)),
+                            "p99_us": float(met.get("p99_us", 0.0)),
+                            "runtime_perf_tflops": float(met.get("runtime_perf_tflops", 0.0)),
+                            "invalid_config": int(met.get("invalid_config", 0)),
+                            "notes": ";".join([x for x in [str(row.get("notes", "")), str(met.get("notes", ""))] if x]),
+                        }
+                    )
 
             append_records(args.results_csv, rows)
             print(

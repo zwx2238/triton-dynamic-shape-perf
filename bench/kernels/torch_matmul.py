@@ -3,9 +3,17 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
+from bench.kernels.backend_runtime import (
+    get_device_name,
+    measure_latencies_us,
+    profile_npu_step_launches_us,
+    resolve_device,
+    synchronize,
+    torch_mm_config_id,
+)
 
 Shape = Tuple[int, int, int]
 
@@ -46,23 +54,22 @@ def _percentile(values: list[float], pct: float) -> float:
 
 
 class TorchMatmulEvaluator:
-    """cuBLAS baseline via torch.mm."""
+    """Torch baseline via torch.mm."""
 
     def __init__(
         self,
         dtype: str = "bf16",
-        device: str = "cuda",
+        device: str = "auto",
         warmup: int = 10,
         repeat: int = 50,
+        npu_timing: str = "event",
     ) -> None:
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA 不可用，无法执行 torch matmul benchmark")
-
         self.dtype_name = dtype
         self.dtype = self._parse_dtype(dtype)
-        self.device = torch.device(device)
+        self.device = resolve_device(device)
         self.warmup = int(warmup)
         self.repeat = int(repeat)
+        self.npu_timing = npu_timing
 
         self._first_launch_done = False
         self._cached_shape: Optional[Shape] = None
@@ -104,9 +111,16 @@ class TorchMatmulEvaluator:
     def _launch(self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> None:
         torch.mm(a, b, out=c)
 
-    def evaluate(self, shape: Shape) -> Dict[str, object]:
+    def get_gpu_name(self) -> str:
+        return get_device_name(self.device)
+
+    def get_torch_config_id(self) -> str:
+        return torch_mm_config_id(self.device)
+
+    def evaluate(self, shape: Shape, timing_mode: str | None = None) -> Dict[str, object]:
         M, N, K = shape
         compile_time_ms = 0.0
+        active_timing_mode = timing_mode or self.npu_timing
 
         try:
             a, b, c = self._get_tensors(shape)
@@ -114,23 +128,20 @@ class TorchMatmulEvaluator:
             if not self._first_launch_done:
                 t0 = time.perf_counter()
                 self._launch(a, b, c)
-                torch.cuda.synchronize(self.device)
+                synchronize(self.device)
                 compile_time_ms = (time.perf_counter() - t0) * 1000.0
                 self._first_launch_done = True
 
             for _ in range(self.warmup):
                 self._launch(a, b, c)
-            torch.cuda.synchronize(self.device)
+            synchronize(self.device)
 
-            start_ev = torch.cuda.Event(enable_timing=True)
-            end_ev = torch.cuda.Event(enable_timing=True)
-            latencies_us: list[float] = []
-            for _ in range(self.repeat):
-                start_ev.record()
-                self._launch(a, b, c)
-                end_ev.record()
-                torch.cuda.synchronize(self.device)
-                latencies_us.append(start_ev.elapsed_time(end_ev) * 1000.0)
+            latencies_us, timing_note = measure_latencies_us(
+                self.device,
+                self.repeat,
+                lambda: self._launch(a, b, c),
+                npu_timing=active_timing_mode,
+            )
 
             p50_us = _percentile(latencies_us, 50)
             p99_us = _percentile(latencies_us, 99)
@@ -138,13 +149,14 @@ class TorchMatmulEvaluator:
             if p50_us > 0:
                 tflops = (2.0 * M * N * K) / (p50_us / 1_000_000.0) / 1e12
 
+            note = f"{self.get_torch_config_id()};timing={timing_note}"
             return EvalMetrics(
                 compile_time_ms=compile_time_ms,
                 runtime_cost_us=p50_us,
                 p99_us=p99_us,
                 runtime_perf_tflops=tflops,
                 invalid_config=0,
-                notes="torch_mm_cublas",
+                notes=note,
             ).to_dict()
         except Exception as exc:  # noqa: BLE001
             return EvalMetrics(
@@ -156,3 +168,70 @@ class TorchMatmulEvaluator:
                 notes=f"{type(exc).__name__}: {exc}",
             ).to_dict()
 
+    def evaluate_batch(self, shapes: Sequence[Shape], timing_mode: str | None = None) -> list[Dict[str, object]]:
+        active_timing_mode = timing_mode or self.npu_timing
+        if not shapes:
+            return []
+        if self.device.type != "npu" or active_timing_mode != "profiler":
+            return [self.evaluate(shape, timing_mode=active_timing_mode) for shape in shapes]
+
+        try:
+            ordered_unique = list(dict.fromkeys(shapes))
+            tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+            for shape in ordered_unique:
+                tensor_map[shape] = self._get_tensors(shape)
+
+            compile_time_ms_first = 0.0
+            if not self._first_launch_done:
+                first_shape = ordered_unique[0]
+                a, b, c = tensor_map[first_shape]
+                t0 = time.perf_counter()
+                self._launch(a, b, c)
+                synchronize(self.device)
+                compile_time_ms_first = (time.perf_counter() - t0) * 1000.0
+                self._first_launch_done = True
+
+            for shape in ordered_unique:
+                a, b, c = tensor_map[shape]
+                for _ in range(self.warmup):
+                    self._launch(a, b, c)
+                synchronize(self.device)
+
+            step_launches = []
+            for shape in shapes:
+                a, b, c = tensor_map[shape]
+                for _ in range(self.repeat):
+                    step_launches.append(lambda a=a, b=b, c=c: self._launch(a, b, c))
+
+            step_latencies, timing_note = profile_npu_step_launches_us(self.device, step_launches)
+            if len(step_latencies) < len(shapes) * self.repeat:
+                return [self.evaluate(shape, timing_mode=active_timing_mode) for shape in shapes]
+
+            out: list[Dict[str, object]] = []
+            for idx, shape in enumerate(shapes):
+                start = idx * self.repeat
+                end = start + self.repeat
+                latencies = step_latencies[start:end]
+                M, N, K = shape
+
+                p50_us = _percentile(latencies, 50)
+                p99_us = _percentile(latencies, 99)
+                tflops = 0.0
+                if p50_us > 0:
+                    tflops = (2.0 * M * N * K) / (p50_us / 1_000_000.0) / 1e12
+
+                note = f"{self.get_torch_config_id()};timing={timing_note}"
+                compile_time_ms = compile_time_ms_first if idx == 0 else 0.0
+                out.append(
+                    EvalMetrics(
+                        compile_time_ms=compile_time_ms,
+                        runtime_cost_us=p50_us,
+                        p99_us=p99_us,
+                        runtime_perf_tflops=tflops,
+                        invalid_config=0,
+                        notes=note,
+                    ).to_dict()
+                )
+            return out
+        except Exception:  # noqa: BLE001
+            return [self.evaluate(shape, timing_mode=active_timing_mode) for shape in shapes]

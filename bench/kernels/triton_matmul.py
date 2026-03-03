@@ -3,13 +3,21 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 import triton
 import triton.language as tl
 
 from bench.configs.base_configs import MatmulConfig
+from bench.kernels.backend_runtime import (
+    align_ascend_toolchain_env,
+    get_device_name,
+    measure_latencies_us,
+    profile_npu_step_launches_us,
+    resolve_device,
+    synchronize,
+)
 
 Shape = Tuple[int, int, int]
 
@@ -108,18 +116,21 @@ class TritonMatmulEvaluator:
     def __init__(
         self,
         dtype: str = "bf16",
-        device: str = "cuda",
+        device: str = "auto",
         warmup: int = 10,
         repeat: int = 50,
+        npu_timing: str = "event",
     ) -> None:
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA 不可用，无法执行 Triton matmul benchmark")
-
         self.dtype_name = dtype
         self.dtype = self._parse_dtype(dtype)
-        self.device = torch.device(device)
+        self.device = resolve_device(device)
         self.warmup = int(warmup)
         self.repeat = int(repeat)
+        self.npu_timing = npu_timing
+        self.env_notes = ""
+
+        if self.device.type == "npu":
+            self.env_notes = align_ascend_toolchain_env()
 
         self.compile_cache: set[tuple[str, str, str]] = set()
         self._cached_shape: Optional[Shape] = None
@@ -136,8 +147,7 @@ class TritonMatmulEvaluator:
         return mapping[dtype]
 
     def get_gpu_name(self) -> str:
-        idx = self.device.index if self.device.index is not None else torch.cuda.current_device()
-        return torch.cuda.get_device_name(idx)
+        return get_device_name(self.device)
 
     def _shape_seed(self, shape: Shape) -> int:
         m, n, k = shape
@@ -191,9 +201,10 @@ class TritonMatmulEvaluator:
             num_stages=cfg.num_stages,
         )
 
-    def evaluate(self, shape: Shape, cfg: MatmulConfig) -> Dict[str, object]:
+    def evaluate(self, shape: Shape, cfg: MatmulConfig, timing_mode: str | None = None) -> Dict[str, object]:
         M, N, K = shape
         compile_time_ms = 0.0
+        active_timing_mode = timing_mode or self.npu_timing
         compile_key = (
             str(self.device),
             self.dtype_name,
@@ -206,23 +217,20 @@ class TritonMatmulEvaluator:
             if compile_key not in self.compile_cache:
                 t0 = time.perf_counter()
                 self._launch(a, b, c, cfg)
-                torch.cuda.synchronize(self.device)
+                synchronize(self.device)
                 compile_time_ms = (time.perf_counter() - t0) * 1000.0
                 self.compile_cache.add(compile_key)
 
             for _ in range(self.warmup):
                 self._launch(a, b, c, cfg)
-            torch.cuda.synchronize(self.device)
+            synchronize(self.device)
 
-            start_ev = torch.cuda.Event(enable_timing=True)
-            end_ev = torch.cuda.Event(enable_timing=True)
-            latencies_us: list[float] = []
-            for _ in range(self.repeat):
-                start_ev.record()
-                self._launch(a, b, c, cfg)
-                end_ev.record()
-                torch.cuda.synchronize(self.device)
-                latencies_us.append(start_ev.elapsed_time(end_ev) * 1000.0)
+            latencies_us, timing_note = measure_latencies_us(
+                self.device,
+                self.repeat,
+                lambda: self._launch(a, b, c, cfg),
+                npu_timing=active_timing_mode,
+            )
 
             p50_us = _percentile(latencies_us, 50)
             p99_us = _percentile(latencies_us, 99)
@@ -230,20 +238,110 @@ class TritonMatmulEvaluator:
             if p50_us > 0:
                 tflops = (2.0 * M * N * K) / (p50_us / 1_000_000.0) / 1e12
 
+            note_parts = []
+            if self.env_notes:
+                note_parts.append(self.env_notes)
+            note_parts.append(f"timing={timing_note}")
             return EvalMetrics(
                 compile_time_ms=compile_time_ms,
                 runtime_cost_us=p50_us,
                 p99_us=p99_us,
                 runtime_perf_tflops=tflops,
                 invalid_config=0,
-                notes="",
+                notes=";".join(note_parts),
             ).to_dict()
         except Exception as exc:  # noqa: BLE001
+            note = f"{type(exc).__name__}: {exc}"
+            if self.env_notes:
+                note = f"{self.env_notes};{note}"
             return EvalMetrics(
                 compile_time_ms=compile_time_ms,
                 runtime_cost_us=0.0,
                 p99_us=0.0,
                 runtime_perf_tflops=0.0,
                 invalid_config=1,
-                notes=f"{type(exc).__name__}: {exc}",
+                notes=note,
             ).to_dict()
+
+    def evaluate_batch(
+        self,
+        entries: Sequence[tuple[Shape, MatmulConfig]],
+        timing_mode: str | None = None,
+    ) -> list[Dict[str, object]]:
+        active_timing_mode = timing_mode or self.npu_timing
+        if not entries:
+            return []
+        if self.device.type != "npu" or active_timing_mode != "profiler":
+            return [self.evaluate(shape, cfg, timing_mode=active_timing_mode) for shape, cfg in entries]
+
+        try:
+            ordered_shapes = list(dict.fromkeys(shape for shape, _ in entries))
+            tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+            for shape in ordered_shapes:
+                tensor_map[shape] = self._get_tensors(shape)
+
+            compile_time_by_index = [0.0 for _ in entries]
+            seen_compile: set[tuple[str, str, str]] = set()
+            for idx, (shape, cfg) in enumerate(entries):
+                compile_key = (str(self.device), self.dtype_name, cfg.config_id)
+                if compile_key in self.compile_cache or compile_key in seen_compile:
+                    continue
+                a, b, c = tensor_map[shape]
+                t0 = time.perf_counter()
+                self._launch(a, b, c, cfg)
+                synchronize(self.device)
+                compile_ms = (time.perf_counter() - t0) * 1000.0
+                compile_time_by_index[idx] = compile_ms
+                seen_compile.add(compile_key)
+                self.compile_cache.add(compile_key)
+
+            unique_entries = list(dict.fromkeys((shape, cfg.config_id) for shape, cfg in entries))
+            cfg_map = {cfg.config_id: cfg for _, cfg in entries}
+            for shape, cfg_id in unique_entries:
+                a, b, c = tensor_map[shape]
+                cfg = cfg_map[cfg_id]
+                for _ in range(self.warmup):
+                    self._launch(a, b, c, cfg)
+                synchronize(self.device)
+
+            step_launches = []
+            for shape, cfg in entries:
+                a, b, c = tensor_map[shape]
+                for _ in range(self.repeat):
+                    step_launches.append(lambda a=a, b=b, c=c, cfg=cfg: self._launch(a, b, c, cfg))
+
+            step_latencies, timing_note = profile_npu_step_launches_us(self.device, step_launches)
+            if len(step_latencies) < len(entries) * self.repeat:
+                return [self.evaluate(shape, cfg, timing_mode=active_timing_mode) for shape, cfg in entries]
+
+            out: list[Dict[str, object]] = []
+            for idx, (shape, _) in enumerate(entries):
+                start = idx * self.repeat
+                end = start + self.repeat
+                latencies = step_latencies[start:end]
+                M, N, K = shape
+
+                p50_us = _percentile(latencies, 50)
+                p99_us = _percentile(latencies, 99)
+                tflops = 0.0
+                if p50_us > 0:
+                    tflops = (2.0 * M * N * K) / (p50_us / 1_000_000.0) / 1e12
+
+                note_parts = []
+                if self.env_notes:
+                    note_parts.append(self.env_notes)
+                note_parts.append(f"timing={timing_note}")
+
+                out.append(
+                    EvalMetrics(
+                        compile_time_ms=compile_time_by_index[idx],
+                        runtime_cost_us=p50_us,
+                        p99_us=p99_us,
+                        runtime_perf_tflops=tflops,
+                        invalid_config=0,
+                        notes=";".join(note_parts),
+                    ).to_dict()
+                )
+            return out
+        except Exception:  # noqa: BLE001
+            return [self.evaluate(shape, cfg, timing_mode=active_timing_mode) for shape, cfg in entries]
