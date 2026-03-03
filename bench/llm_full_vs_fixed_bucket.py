@@ -14,7 +14,6 @@ from bench.policies.full_autotune import FullAutotunePolicy
 from bench.policies.llm_bucket8_autotune import (
     LlmBucket8AutotunePolicy,
     llm_bucket8_key,
-    llm_bucket8_key_to_str,
 )
 
 Shape = Tuple[int, int, int]
@@ -96,6 +95,8 @@ def _make_record(
     M, N, K = shape
     cfg = selection.config
     key = llm_bucket8_key(M, K)
+    bucket_m = int(key)
+    bucket_n = -1
     notes = []
     if selection.notes:
         notes.append(selection.notes)
@@ -126,8 +127,8 @@ def _make_record(
         "runtime_cost_us": float(metrics.get("runtime_cost_us", 0.0)),
         "p99_us": float(metrics.get("p99_us", 0.0)),
         "runtime_perf_tflops": float(metrics.get("runtime_perf_tflops", 0.0)),
-        "bucket_m": key[0],
-        "bucket_n": key[1],
+        "bucket_m": bucket_m,
+        "bucket_n": bucket_n,
         "bucket_k": -1,
         "cache_key": selection.cache_key,
         "invalid_config": int(metrics.get("invalid_config", 0)),
@@ -136,8 +137,7 @@ def _make_record(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Clean llm_style-only benchmark: Plan A vs Plan B")
-    parser.add_argument("--methods", nargs="+", default=["A", "B"], choices=["A", "B"])
+    parser = argparse.ArgumentParser(description="llm_style benchmark: FULL autotune vs fixed BUCKET autotune")
     parser.add_argument("--candidate-ids", type=str, default=",".join(c.config_id for c in BASE_CONFIGS))
     parser.add_argument("--tune-size", type=int, default=64)
     parser.add_argument("--eval-size", type=int, default=256)
@@ -147,7 +147,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeat", type=int, default=50)
-    parser.add_argument("--results-csv", type=str, default="results/phase2_llm_clean_ab.csv")
+    parser.add_argument("--results-csv", type=str, default="results/llm_full_vs_bucket.csv")
     parser.add_argument("--reset-results", action="store_true")
     return parser.parse_args()
 
@@ -179,31 +179,32 @@ def main() -> None:
     )
     gpu = evaluator.get_gpu_name()
 
-    for method in args.methods:
+    for method in ("FULL", "BUCKET"):
         budget = BudgetTracker(args.budget_seconds)
         rows: List[Dict[str, object]] = []
 
-        if method == "A":
+        if method == "FULL":
             policy = FullAutotunePolicy(candidates)
             for i, shape in enumerate(tune_set):
                 if budget.exceeded():
                     break
                 sel = policy.select(shape, evaluator.evaluate, budget)
                 met = sel.premeasure if sel.premeasure is not None else evaluator.evaluate(shape, sel.config)
-                rows.append(_make_record("A", "tune", i, shape, sel, met, args.dtype, gpu))
+                rows.append(_make_record("FULL", "tune", i, shape, sel, met, args.dtype, gpu))
             for i, shape in enumerate(eval_set):
                 if budget.exceeded():
                     break
                 sel = policy.select(shape, evaluator.evaluate, budget)
                 met = sel.premeasure if sel.premeasure is not None else evaluator.evaluate(shape, sel.config)
-                rows.append(_make_record("A", "eval", i, shape, sel, met, args.dtype, gpu))
+                rows.append(_make_record("FULL", "eval", i, shape, sel, met, args.dtype, gpu))
             append_records(args.results_csv, rows)
             print(
-                f"[method=A] rows={len(rows)} elapsed_s={budget.elapsed_seconds():.2f} budget_s={args.budget_seconds:.2f}"
+                f"[method=FULL] rows={len(rows)} elapsed_s={budget.elapsed_seconds():.2f} "
+                f"budget_s={args.budget_seconds:.2f}"
             )
             continue
 
-        if method == "B":
+        if method == "BUCKET":
             policy = LlmBucket8AutotunePolicy(candidates)
             tuned_keys = set()
             for i, shape in enumerate(tune_set):
@@ -211,7 +212,7 @@ def main() -> None:
                     break
                 sel = policy.select(shape, evaluator.evaluate, budget)
                 met = sel.premeasure if sel.premeasure is not None else evaluator.evaluate(shape, sel.config)
-                rows.append(_make_record("B", "tune", i, shape, sel, met, args.dtype, gpu))
+                rows.append(_make_record("BUCKET", "tune", i, shape, sel, met, args.dtype, gpu))
                 tuned_keys.add(llm_bucket8_key(shape[0], shape[2]))
 
             missing = eval_keys - tuned_keys
@@ -225,11 +226,11 @@ def main() -> None:
                 if sel.tune_time_ms > 0:
                     raise RuntimeError("BUG: bucket policy 在 eval 阶段发生了调参")
                 met = evaluator.evaluate(shape, sel.config)
-                rows.append(_make_record("B", "eval", i, shape, sel, met, args.dtype, gpu))
+                rows.append(_make_record("BUCKET", "eval", i, shape, sel, met, args.dtype, gpu))
 
             append_records(args.results_csv, rows)
             print(
-                f"[method=B] rows={len(rows)} elapsed_s={budget.elapsed_seconds():.2f} "
+                f"[method=BUCKET] rows={len(rows)} elapsed_s={budget.elapsed_seconds():.2f} "
                 f"budget_s={args.budget_seconds:.2f} tuned_keys={len(tuned_keys)}"
             )
             continue

@@ -1,1 +1,1 @@
-"""Phase 1 benchmarking package."""
+"""Triton dynamic-shape benchmark package."""

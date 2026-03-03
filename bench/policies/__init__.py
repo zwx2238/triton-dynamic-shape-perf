@@ -1,1 +1,1 @@
-"""Tuning policy implementations for phase 1."""
+"""Tuning policies used by the llm_style comparison script."""
