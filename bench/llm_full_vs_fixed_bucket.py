@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import math
 import random
@@ -8,7 +9,7 @@ import statistics
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from bench.configs.base_configs import BASE_CONFIGS, CONFIG_MAP, MatmulConfig
 from bench.csv_logger import append_records, reset_csv
@@ -180,6 +181,135 @@ def _pick_representative_shape(shapes: Sequence[Shape]) -> Shape:
     return min(shapes, key=_score)
 
 
+def _shape_feature(shape: Shape) -> tuple[float, float, float, float]:
+    m, n, k = shape
+    lm = math.log2(max(1, m))
+    ln = math.log2(max(1, n))
+    lk = math.log2(max(1, k))
+    lr = math.log2(max(1e-9, n / k))
+    return lm, ln, lk, lr
+
+
+def _feature_dist2(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b))
+
+
+def _pick_typical_shapes(shapes: Sequence[Shape], count: int) -> List[Shape]:
+    if count <= 0:
+        return []
+    unique_shapes = list(dict.fromkeys(shapes))
+    if not unique_shapes:
+        raise RuntimeError("空 shape 集合，无法选择典型 shape")
+    if count >= len(unique_shapes):
+        return unique_shapes
+
+    feats = {s: _shape_feature(s) for s in unique_shapes}
+    first = _pick_representative_shape(unique_shapes)
+    selected: List[Shape] = [first]
+    selected_set = {first}
+
+    while len(selected) < count:
+        best_shape: Optional[Shape] = None
+        best_score = -1.0
+        for cand in unique_shapes:
+            if cand in selected_set:
+                continue
+            dist_to_selected = min(_feature_dist2(feats[cand], feats[s]) for s in selected)
+            if best_shape is None or dist_to_selected > best_score:
+                best_shape = cand
+                best_score = dist_to_selected
+        if best_shape is None:
+            break
+        selected.append(best_shape)
+        selected_set.add(best_shape)
+    return selected
+
+
+def _rank_configs_by_metrics(
+    candidates: Sequence[MatmulConfig],
+    metrics_seq: Sequence[Dict[str, object]],
+) -> List[tuple[MatmulConfig, Dict[str, object], float]]:
+    ranked: List[tuple[MatmulConfig, Dict[str, object], float]] = []
+    for cfg, met in zip(candidates, metrics_seq):
+        invalid = int(met.get("invalid_config", 0))
+        us = float(met.get("runtime_cost_us", 0.0))
+        score = us if invalid == 0 and us > 0.0 else 1e30
+        ranked.append((cfg, met, score))
+    ranked.sort(key=lambda x: x[2])
+    return ranked
+
+
+def _derive_candidate_pool_from_typical_shapes(
+    typical_shapes: Sequence[Shape],
+    candidates: Sequence[MatmulConfig],
+    eval_one: Callable[[Shape, MatmulConfig], Dict[str, object]],
+    eval_batch: Optional[Callable[[Shape, Sequence[MatmulConfig]], Sequence[Dict[str, object]]]] = None,
+) -> tuple[List[MatmulConfig], List[Dict[str, object]]]:
+    per_shape_ranked: List[List[tuple[MatmulConfig, Dict[str, object], float]]] = []
+    report_rows: List[Dict[str, object]] = []
+
+    for shape in typical_shapes:
+        if eval_batch is not None:
+            metrics_seq = list(eval_batch(shape, candidates))
+            if len(metrics_seq) != len(candidates):
+                metrics_seq = [eval_one(shape, cfg) for cfg in candidates]
+        else:
+            metrics_seq = [eval_one(shape, cfg) for cfg in candidates]
+        ranked = _rank_configs_by_metrics(candidates, metrics_seq)
+        per_shape_ranked.append(ranked)
+
+        if ranked:
+            top_cfg, top_met, top_score = ranked[0]
+            report_rows.append(
+                {
+                    "shape": f"{shape[0]}x{shape[1]}x{shape[2]}",
+                    "picked_config_id": top_cfg.config_id,
+                    "BLOCK_M": top_cfg.BLOCK_M,
+                    "BLOCK_N": top_cfg.BLOCK_N,
+                    "BLOCK_K": top_cfg.BLOCK_K,
+                    "runtime_cost_us": float(top_met.get("runtime_cost_us", 0.0)),
+                    "invalid_config": int(top_met.get("invalid_config", 0)),
+                    "score": top_score,
+                    "notes": str(top_met.get("notes", "")),
+                }
+            )
+
+    chosen: List[MatmulConfig] = []
+    chosen_ids: set[str] = set()
+
+    for ranked in per_shape_ranked:
+        if not ranked:
+            continue
+        cfg = ranked[0][0]
+        if cfg.config_id not in chosen_ids:
+            chosen.append(cfg)
+            chosen_ids.add(cfg.config_id)
+
+    return chosen, report_rows
+
+
+def _write_prototype_report_csv(path: str, rows: Sequence[Dict[str, object]]) -> None:
+    if not rows:
+        return
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "shape",
+        "picked_config_id",
+        "BLOCK_M",
+        "BLOCK_N",
+        "BLOCK_K",
+        "runtime_cost_us",
+        "invalid_config",
+        "score",
+        "notes",
+    ]
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _shape_id(split: str, idx: int) -> str:
     return f"llm_style_{split}_{idx:03d}"
 
@@ -296,10 +426,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=["FULL", "BUCKET", "TORCH", "ONEKEY"],
+        default=["BUCKET", "TORCH"],
         choices=["FULL", "BUCKET", "TORCH", "ONEKEY"],
     )
     parser.add_argument("--candidate-ids", type=str, default=",".join(c.config_id for c in BASE_CONFIGS))
+    parser.add_argument(
+        "--prototype-count",
+        type=int,
+        default=4,
+        help="先选 N 个典型 shape，并为每个 shape 找到最优 config，作为后续 tune 的候选池；0 表示关闭",
+    )
+    parser.add_argument(
+        "--prototype-report-csv",
+        type=str,
+        default="",
+        help="典型 shape -> 最优 config 报告 CSV 路径；为空时自动放到 results 旁边",
+    )
+    parser.add_argument(
+        "--prototype-only",
+        action="store_true",
+        help="只运行 prototype 选配置并输出报告，不执行 BUCKET/TORCH/FULL/ONEKEY 主流程",
+    )
     parser.add_argument("--tune-size", type=int, default=64)
     parser.add_argument("--eval-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=20260302)
@@ -318,6 +465,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bucket-m-split", type=int, default=DEFAULT_M_SPLIT)
     parser.add_argument("--bucket-n-split", type=int, default=DEFAULT_N_SPLIT)
     parser.add_argument("--bucket-k-split", type=int, default=DEFAULT_K_SPLIT)
+    parser.add_argument(
+        "--disable-onekey-torch-guard",
+        action="store_true",
+        help="禁用 ONEKEY 代表 shape 必须优于 torch 的门槛（默认启用）",
+    )
+    parser.add_argument(
+        "--onekey-min-speedup-vs-torch",
+        type=float,
+        default=0.0,
+        help="ONEKEY 代表 shape 门槛: torch_us / triton_us >= 该值（默认 0：仅记录不拦截）",
+    )
     parser.add_argument("--results-csv", type=str, default="results/llm_full_vs_bucket.csv")
     parser.add_argument("--reset-results", action="store_true")
     return parser.parse_args()
@@ -351,7 +509,8 @@ def main() -> None:
     Path(args.results_csv).parent.mkdir(parents=True, exist_ok=True)
 
     need_triton = any(method in {"FULL", "BUCKET", "ONEKEY"} for method in args.methods)
-    need_torch = "TORCH" in args.methods
+    onekey_guard_enabled = ("ONEKEY" in args.methods) and (not args.disable_onekey_torch_guard)
+    need_torch = ("TORCH" in args.methods) or onekey_guard_enabled
 
     triton_evaluator: Optional[TritonMatmulEvaluator] = None
     torch_evaluator: Optional[TorchMatmulEvaluator] = None
@@ -382,6 +541,7 @@ def main() -> None:
         raise RuntimeError("methods 为空，至少需要一个方法")
 
     device_type = triton_evaluator.device.type if triton_evaluator is not None else torch_evaluator.device.type
+
     if device_type == "npu":
         if args.npu_timing == "event":
             tune_timing_mode = "event"
@@ -423,6 +583,38 @@ def main() -> None:
         if torch_evaluator is None:
             raise RuntimeError("内部错误：缺少 torch evaluator")
         return torch_evaluator.evaluate(shape, timing_mode=eval_timing_mode)
+
+    if need_triton and args.prototype_count > 0:
+        if triton_evaluator is None:
+            raise RuntimeError("内部错误：原型 shape 选优缺少 triton evaluator")
+        proto_count = min(int(args.prototype_count), len(tune_set))
+        typical_shapes = _pick_typical_shapes(tune_set, proto_count)
+        proto_candidates, proto_rows = _derive_candidate_pool_from_typical_shapes(
+            typical_shapes,
+            candidates,
+            triton_eval_tune,
+            eval_batch=triton_eval_tune_batch if use_profiler_batch_tune else None,
+        )
+        if proto_candidates:
+            candidates = proto_candidates
+        cfg_desc = ", ".join(
+            f"{c.config_id}(BM={c.BLOCK_M},BN={c.BLOCK_N},BK={c.BLOCK_K})" for c in candidates
+        )
+        shape_desc = ", ".join(f"{m}x{n}x{k}" for m, n, k in typical_shapes)
+        print(
+            f"[prototype] shapes={len(typical_shapes)} [{shape_desc}] "
+            f"=> candidates={len(candidates)} [{cfg_desc}]"
+        )
+
+        report_csv = args.prototype_report_csv
+        if not report_csv:
+            p = Path(args.results_csv)
+            report_csv = str(p.with_name(f"{p.stem}_prototype_best.csv"))
+        _write_prototype_report_csv(report_csv, proto_rows)
+        print(f"[prototype] report_csv={report_csv}")
+        if args.prototype_only:
+            print("prototype-only done.")
+            return
 
     for method in args.methods:
         budget = BudgetTracker(args.budget_seconds)
@@ -747,6 +939,48 @@ def main() -> None:
 
             rep_cache_key = f"onekey:{rep_shape[0]}x{rep_shape[1]}x{rep_shape[2]}"
             rep_notes = f"onekey_rep_shape={rep_shape[0]}x{rep_shape[1]}x{rep_shape[2]}"
+
+            if onekey_guard_enabled:
+                if torch_evaluator is None:
+                    raise RuntimeError("内部错误：ONEKEY torch 门槛检查缺少 torch evaluator")
+                if use_profiler_batch_tune:
+                    torch_rep_metrics = torch_evaluator.evaluate_batch([rep_shape], timing_mode=tune_timing_mode)[0]
+                else:
+                    torch_rep_metrics = torch_eval_tune(rep_shape)
+
+                triton_invalid = int(best_metrics.get("invalid_config", 0)) == 1
+                torch_invalid = int(torch_rep_metrics.get("invalid_config", 0)) == 1
+                triton_us = float(best_metrics.get("runtime_cost_us", 0.0))
+                torch_us = float(torch_rep_metrics.get("runtime_cost_us", 0.0))
+                speedup_vs_torch = 0.0
+                if triton_us > 0:
+                    speedup_vs_torch = torch_us / triton_us
+
+                guard_note = (
+                    "onekey_rep_vs_torch="
+                    f"{speedup_vs_torch:.6f}x(torch={torch_us:.3f}us,triton={triton_us:.3f}us,"
+                    f"min={args.onekey_min_speedup_vs_torch:.3f})"
+                )
+                rep_notes = f"{rep_notes};{guard_note}"
+
+                min_speedup = float(args.onekey_min_speedup_vs_torch)
+                guard_pass = (
+                    (not triton_invalid)
+                    and (not torch_invalid)
+                    and triton_us > 0.0
+                    and torch_us > 0.0
+                    and (min_speedup <= 0.0 or speedup_vs_torch >= min_speedup)
+                )
+                if not guard_pass:
+                    raise RuntimeError(
+                        "ONEKEY 门槛失败: "
+                        f"rep_shape={rep_shape[0]}x{rep_shape[1]}x{rep_shape[2]}, "
+                        f"cfg={best_cfg.config_id}, "
+                        f"torch_us={torch_us:.3f}, triton_us={triton_us:.3f}, "
+                        f"speedup={speedup_vs_torch:.6f}x, "
+                        f"min_required={min_speedup:.3f}. "
+                        "请先调整 --candidate-ids 或代表 shape 选择策略。"
+                    )
             if notes:
                 rep_notes = f"{rep_notes};{notes}"
 

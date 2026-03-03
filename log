@@ -1,0 +1,12 @@
+run_dir=results/pipeline_repro_20260303T142236Z
+[2026-03-03T14:22:36Z] run_dir=results/pipeline_repro_20260303T142236Z
+[2026-03-03T14:22:36Z] log_file=results/pipeline_repro_20260303T142236Z/pipeline.log
+[2026-03-03T14:22:36Z] status_file=results/pipeline_repro_20260303T142236Z/status.txt
+[2026-03-03T14:22:36Z] stage_times_csv=results/pipeline_repro_20260303T142236Z/stage_times.csv
+[2026-03-03T14:22:36Z] params: device=npu dtype=fp16 npu_timing=profiler_all tune_size=16 eval_size=16 prototype_count=4
+[2026-03-03T14:22:36Z] START stage=prototype_select
+[2026-03-03T14:23:18Z] END stage=prototype_select elapsed_sec=42
+[2026-03-03T14:23:18Z] START stage=prototype_dedup
+[2026-03-03T14:23:18Z] END stage=prototype_dedup elapsed_sec=0
+[2026-03-03T14:23:18Z] candidate_ids_effective=c24,c12,c29,c18
+[2026-03-03T14:23:18Z] START stage=benchmark_bucket_torch

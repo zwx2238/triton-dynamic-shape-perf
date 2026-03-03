@@ -1,0 +1,147 @@
+[2026-03-03T14:22:36Z] run_dir=results/pipeline_repro_20260303T142236Z
+[2026-03-03T14:22:36Z] log_file=results/pipeline_repro_20260303T142236Z/pipeline.log
+[2026-03-03T14:22:36Z] status_file=results/pipeline_repro_20260303T142236Z/status.txt
+[2026-03-03T14:22:36Z] stage_times_csv=results/pipeline_repro_20260303T142236Z/stage_times.csv
+[2026-03-03T14:22:36Z] params: device=npu dtype=fp16 npu_timing=profiler_all tune_size=16 eval_size=16 prototype_count=4
+[2026-03-03T14:22:36Z] START stage=prototype_select
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[2026-03-03 22:22:51] [INFO] [572665] profiler.py: Start parsing profiling data: /tmp/npu_prof_batch_0ippa_t1/autodl-container-d19d40bcb0-6111d4c9_572418_20260303222250789_ascend_pt
+|/-\[2026-03-03 22:22:54] [INFO] [572674] profiler.py: CANN profiling data parsed in a total time of 0:00:03.032561
+|[2026-03-03 22:22:55] [INFO] [572665] profiler.py: All profiling data parsed in a total time of 0:00:04.571792
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[2026-03-03 22:22:56] [INFO] [572963] profiler.py: Start parsing profiling data: /tmp/npu_prof_batch_6j4mflji/autodl-container-d19d40bcb0-6111d4c9_572418_20260303222256472_ascend_pt
+|/-[2026-03-03 22:22:58] [INFO] [572972] profiler.py: CANN profiling data parsed in a total time of 0:00:02.034478
+\[2026-03-03 22:23:00] [INFO] [572963] profiler.py: All profiling data parsed in a total time of 0:00:03.507528
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[2026-03-03 22:23:01] [INFO] [573261] profiler.py: Start parsing profiling data: /tmp/npu_prof_batch_a9vimfqp/autodl-container-d19d40bcb0-6111d4c9_572418_20260303222301097_ascend_pt
+|/-[2026-03-03 22:23:03] [INFO] [573270] profiler.py: CANN profiling data parsed in a total time of 0:00:02.032794
+\[2026-03-03 22:23:04] [INFO] [573261] profiler.py: All profiling data parsed in a total time of 0:00:03.528074
+[2026-03-03 22:23:07] [INFO] [573559] profiler.py: Start parsing profiling data: /tmp/npu_prof_batch_bhjslgct/autodl-container-d19d40bcb0-6111d4c9_572418_20260303222307277_ascend_pt
+|/-[2026-03-03 22:23:09] [INFO] [573568] profiler.py: CANN profiling data parsed in a total time of 0:00:02.031762
+\[2026-03-03 22:23:11] [INFO] [573559] profiler.py: All profiling data parsed in a total time of 0:00:03.512857
+[prototype] shapes=4 [8x2048x4096, 64x6144x1024, 4x6144x1024, 64x8192x8192] => candidates=4 [c24(BM=16,BN=128,BK=128), c12(BM=128,BN=128,BK=128), c29(BM=16,BN=256,BK=128), c18(BM=64,BN=128,BK=128)]
+[prototype] report_csv=results/pipeline_repro_20260303T142236Z/prototype_best.csv
+prototype-only done.
+[2026-03-03T14:23:18Z] END stage=prototype_select elapsed_sec=42
+[2026-03-03T14:23:18Z] START stage=prototype_dedup
+prototype_candidate_ids=c24,c12,c29,c18
+[2026-03-03T14:23:18Z] END stage=prototype_dedup elapsed_sec=0
+[2026-03-03T14:23:18Z] candidate_ids_effective=c24,c12,c29,c18
+[2026-03-03T14:23:18Z] START stage=benchmark_bucket_torch
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[2026-03-03 22:23:29] [INFO] [574060] profiler.py: Start parsing profiling data: /tmp/npu_prof_batch_84jbkrv_/autodl-container-d19d40bcb0-6111d4c9_573899_20260303222329215_ascend_pt
+|/-\[2026-03-03 22:23:32] [INFO] [574093] profiler.py: CANN profiling data parsed in a total time of 0:00:03.033148
+|[2026-03-03 22:23:33] [INFO] [574060] profiler.py: All profiling data parsed in a total time of 0:00:04.450431
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[2026-03-03 22:23:35] [INFO] [574431] profiler.py: Start parsing profiling data: /tmp/npu_prof_eval_iq0xm0em/autodl-container-d19d40bcb0-6111d4c9_573899_20260303222335013_ascend_pt
+|/-[2026-03-03 22:23:37] [INFO] [574440] profiler.py: CANN profiling data parsed in a total time of 0:00:02.031521
+\[2026-03-03 22:23:38] [INFO] [574431] profiler.py: All profiling data parsed in a total time of 0:00:03.421603
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[2026-03-03 22:23:41] [INFO] [574740] profiler.py: Start parsing profiling data: /tmp/npu_prof_batch_p0c8brf1/autodl-container-d19d40bcb0-6111d4c9_573899_20260303222341105_ascend_pt
+|/-[2026-03-03 22:23:43] [INFO] [574749] profiler.py: CANN profiling data parsed in a total time of 0:00:02.031657
+\[2026-03-03 22:23:44] [INFO] [574740] profiler.py: All profiling data parsed in a total time of 0:00:03.431225
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[2026-03-03 22:23:45] [INFO] [575038] profiler.py: Start parsing profiling data: /tmp/npu_prof_batch_hsq05yc7/autodl-container-d19d40bcb0-6111d4c9_573899_20260303222345592_ascend_pt
+|/-[2026-03-03 22:23:47] [INFO] [575047] profiler.py: CANN profiling data parsed in a total time of 0:00:02.032175
+\[2026-03-03 22:23:49] [INFO] [575038] profiler.py: All profiling data parsed in a total time of 0:00:03.447471
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[2026-03-03 22:23:50] [INFO] [575372] profiler.py: Start parsing profiling data: /tmp/npu_prof_batch_ihy7at5k/autodl-container-d19d40bcb0-6111d4c9_573899_20260303222350742_ascend_pt
+|/-[2026-03-03 22:23:53] [INFO] [575381] profiler.py: CANN profiling data parsed in a total time of 0:00:02.036815
+\[2026-03-03 22:23:54] [INFO] [575372] profiler.py: All profiling data parsed in a total time of 0:00:03.461642
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[2026-03-03 22:23:56] [INFO] [575670] profiler.py: Start parsing profiling data: /tmp/npu_prof_batch_ti5dy7lz/autodl-container-d19d40bcb0-6111d4c9_573899_20260303222355923_ascend_pt
+|/-[2026-03-03 22:23:58] [INFO] [575679] profiler.py: CANN profiling data parsed in a total time of 0:00:02.032377
+\[2026-03-03 22:23:59] [INFO] [575670] profiler.py: All profiling data parsed in a total time of 0:00:03.434417
+[WARNING] Please DO NOT tune args ['num_warps', 'num_stages']!
+[2026-03-03 22:24:00] [INFO] [575969] profiler.py: Start parsing profiling data: /tmp/npu_prof_eval_40faezgu/autodl-container-d19d40bcb0-6111d4c9_573899_20260303222400421_ascend_pt
+|/-[2026-03-03 22:24:02] [INFO] [575978] profiler.py: CANN profiling data parsed in a total time of 0:00:02.031642
+\[2026-03-03 22:24:04] [INFO] [575969] profiler.py: All profiling data parsed in a total time of 0:00:03.604572
+[2026-03-03 22:24:05] [INFO] [576261] profiler.py: Start parsing profiling data: /tmp/npu_prof_batch_d9r5emyo/autodl-container-d19d40bcb0-6111d4c9_573899_20260303222404932_ascend_pt
+|/-[2026-03-03 22:24:07] [INFO] [576270] profiler.py: CANN profiling data parsed in a total time of 0:00:02.032074
+\[2026-03-03 22:24:08] [INFO] [576261] profiler.py: All profiling data parsed in a total time of 0:00:03.476974
+[2026-03-03 22:24:09] [INFO] [576548] profiler.py: Start parsing profiling data: /tmp/npu_prof_eval_ppkwg7h9/autodl-container-d19d40bcb0-6111d4c9_573899_20260303222409395_ascend_pt
+|/-[2026-03-03 22:24:11] [INFO] [576557] profiler.py: CANN profiling data parsed in a total time of 0:00:02.032017
+\[2026-03-03 22:24:12] [INFO] [576548] profiler.py: All profiling data parsed in a total time of 0:00:03.448633
+[2026-03-03 22:24:14] [INFO] [576846] profiler.py: Start parsing profiling data: /tmp/npu_prof_eval_wrnk3oj_/autodl-container-d19d40bcb0-6111d4c9_573899_20260303222414044_ascend_pt
+|/

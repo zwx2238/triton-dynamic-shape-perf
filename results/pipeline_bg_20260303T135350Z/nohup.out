@@ -1,0 +1,6 @@
+[2026-03-03T13:53:50Z] run_dir=results/pipeline_bg_20260303T135350Z
+[2026-03-03T13:53:50Z] log_file=results/pipeline_bg_20260303T135350Z/pipeline.log
+[2026-03-03T13:53:50Z] status_file=results/pipeline_bg_20260303T135350Z/status.txt
+[2026-03-03T13:53:50Z] stage_times_csv=results/pipeline_bg_20260303T135350Z/stage_times.csv
+[2026-03-03T13:53:50Z] params: device=npu dtype=fp16 npu_timing=profiler_all tune_size=16 eval_size=16 prototype_count=4
+[2026-03-03T13:53:50Z] START stage=prototype_select

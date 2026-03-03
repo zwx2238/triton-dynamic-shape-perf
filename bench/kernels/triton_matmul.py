@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, Tuple
@@ -39,42 +40,51 @@ def _matmul_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    GROUP_M: tl.constexpr,
+    SWIZZLE_GROUP: tl.constexpr,
+    SWIZZLE_DIRECTION: tl.constexpr,
+    NUM_CORES: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
     num_pid_n = tl.cdiv(N, BLOCK_N)
+    num_blocks = num_pid_m * num_pid_n
 
-    num_pid_in_group = GROUP_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_M
-    group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
+    for block_idx in range(pid, num_blocks, NUM_CORES):
+        block_m = block_idx // num_pid_n
+        block_n = block_idx % num_pid_n
 
-    pid_in_group = pid % num_pid_in_group
-    pid_m = first_pid_m + (pid_in_group % group_size_m)
-    pid_n = pid_in_group // group_size_m
+        if SWIZZLE_DIRECTION == 0:
+            pid_m, pid_n = tl.swizzle2d(block_m, block_n, num_pid_m, num_pid_n, SWIZZLE_GROUP)
+        else:
+            size_gj = SWIZZLE_GROUP * num_pid_m
+            group_id = block_idx // size_gj
+            off_n = group_id * SWIZZLE_GROUP
+            cur_size_g = tl.minimum(num_pid_n - off_n, SWIZZLE_GROUP)
+            local_ij = block_idx % size_gj
+            pid_m = local_ij // cur_size_g
+            pid_n = off_n + (local_ij % cur_size_g)
 
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
 
-    a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
-    b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+        a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
+        b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
 
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for _ in range(0, tl.cdiv(K, BLOCK_K)):
-        k_mask = offs_k < K
-        a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & k_mask[None, :], other=0.0)
-        b = tl.load(b_ptrs, mask=k_mask[:, None] & (offs_n[None, :] < N), other=0.0)
-        acc += tl.dot(a, b)
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for _ in range(0, tl.cdiv(K, BLOCK_K)):
+            k_mask = offs_k < K
+            a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & k_mask[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=k_mask[:, None] & (offs_n[None, :] < N), other=0.0)
+            acc += tl.dot(a, b)
 
-        a_ptrs += BLOCK_K * stride_ak
-        b_ptrs += BLOCK_K * stride_bk
-        offs_k += BLOCK_K
+            a_ptrs += BLOCK_K * stride_ak
+            b_ptrs += BLOCK_K * stride_bk
+            offs_k += BLOCK_K
 
-    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
-    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    tl.store(c_ptrs, acc, mask=c_mask)
+        c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+        c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+        tl.store(c_ptrs, acc, mask=c_mask)
 
 
 @dataclass
@@ -128,6 +138,12 @@ class TritonMatmulEvaluator:
         self.repeat = int(repeat)
         self.npu_timing = npu_timing
         self.env_notes = ""
+        default_cores = 20
+        device_name_hint = str(get_device_name(self.device))
+        if "910B2" in device_name_hint:
+            default_cores = 24
+        self.ascend_num_cores = int(os.environ.get("TRITON_ASCEND_NUM_CORES", str(default_cores)))
+        self.ascend_swizzle_group = 4
 
         if self.device.type == "npu":
             self.env_notes = align_ascend_toolchain_env()
@@ -176,9 +192,21 @@ class TritonMatmulEvaluator:
         M, K = a.shape
         _, N = b.shape
 
-        grid = (
-            triton.cdiv(M, cfg.BLOCK_M) * triton.cdiv(N, cfg.BLOCK_N),
-        )
+        total_blocks = triton.cdiv(M, cfg.BLOCK_M) * triton.cdiv(N, cfg.BLOCK_N)
+        if self.device.type == "npu":
+            launch_programs = max(1, min(self.ascend_num_cores, total_blocks))
+            swizzle_group = self.ascend_swizzle_group
+            swizzle_direction = 1 if M < N else 0
+            launch_num_warps = 4
+            launch_num_stages = 2
+        else:
+            launch_programs = max(1, total_blocks)
+            swizzle_group = max(1, int(cfg.GROUP_M))
+            swizzle_direction = 0
+            launch_num_warps = cfg.num_warps
+            launch_num_stages = cfg.num_stages
+
+        grid = (launch_programs,)
 
         _matmul_kernel[grid](
             a,
@@ -196,10 +224,23 @@ class TritonMatmulEvaluator:
             BLOCK_M=cfg.BLOCK_M,
             BLOCK_N=cfg.BLOCK_N,
             BLOCK_K=cfg.BLOCK_K,
-            GROUP_M=cfg.GROUP_M,
-            num_warps=cfg.num_warps,
-            num_stages=cfg.num_stages,
+            SWIZZLE_GROUP=swizzle_group,
+            SWIZZLE_DIRECTION=swizzle_direction,
+            NUM_CORES=launch_programs,
+            num_warps=launch_num_warps,
+            num_stages=launch_num_stages,
         )
+    
+    def _kernel_launch_note(self, shape: Shape, cfg: MatmulConfig) -> str:
+        M, N, _ = shape
+        total_blocks = triton.cdiv(M, cfg.BLOCK_M) * triton.cdiv(N, cfg.BLOCK_N)
+        if self.device.type == "npu":
+            launch_programs = max(1, min(self.ascend_num_cores, total_blocks))
+            swizzle_group = self.ascend_swizzle_group
+            swizzle_direction = 1 if M < N else 0
+            return f"launch=fixed_cores({launch_programs}),swizzle2d_g={swizzle_group},dir={swizzle_direction}"
+        launch_programs = max(1, total_blocks)
+        return f"launch=all_blocks({launch_programs})"
 
     def evaluate(self, shape: Shape, cfg: MatmulConfig, timing_mode: str | None = None) -> Dict[str, object]:
         M, N, K = shape
@@ -241,6 +282,7 @@ class TritonMatmulEvaluator:
             note_parts = []
             if self.env_notes:
                 note_parts.append(self.env_notes)
+            note_parts.append(self._kernel_launch_note(shape, cfg))
             note_parts.append(f"timing={timing_note}")
             return EvalMetrics(
                 compile_time_ms=compile_time_ms,
@@ -330,6 +372,7 @@ class TritonMatmulEvaluator:
                 note_parts = []
                 if self.env_notes:
                     note_parts.append(self.env_notes)
+                note_parts.append(self._kernel_launch_note(shape, entries[idx][1]))
                 note_parts.append(f"timing={timing_note}")
 
                 out.append(

@@ -1,0 +1,5 @@
+status=running
+stage=prototype_select
+updated_at=2026-03-03T13:53:50Z
+run_dir=results/pipeline_bg_20260303T135350Z
+log_file=results/pipeline_bg_20260303T135350Z/pipeline.log

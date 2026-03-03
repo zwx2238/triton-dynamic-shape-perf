@@ -1,0 +1,5 @@
+status=running
+stage=benchmark_bucket_torch
+updated_at=2026-03-03T14:23:18Z
+run_dir=results/pipeline_repro_20260303T142236Z
+log_file=results/pipeline_repro_20260303T142236Z/pipeline.log
