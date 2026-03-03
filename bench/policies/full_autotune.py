@@ -4,7 +4,7 @@ import time
 from typing import Dict, Optional, Sequence, Tuple
 
 from bench.configs.base_configs import MatmulConfig
-from bench.policies.common import BudgetTracker, EvaluatorFn, SelectionResult, autotune_best
+from bench.policies.common import BatchEvaluatorFn, BudgetTracker, EvaluatorFn, SelectionResult, autotune_best
 
 Shape = Tuple[int, int, int]
 
@@ -16,14 +16,26 @@ class FullAutotunePolicy:
         self.candidates = list(candidates)
         self.cache: Dict[Shape, MatmulConfig] = {}
 
-    def select(self, shape: Shape, evaluator: EvaluatorFn, budget: BudgetTracker) -> SelectionResult:
+    def select(
+        self,
+        shape: Shape,
+        evaluator: EvaluatorFn,
+        budget: BudgetTracker,
+        batch_evaluator: Optional[BatchEvaluatorFn] = None,
+    ) -> SelectionResult:
         if shape in self.cache:
             cfg = self.cache[shape]
             M, N, K = shape
             return SelectionResult(config=cfg, cache_key=f"{M}x{N}x{K}")
 
         t0 = time.perf_counter()
-        best_cfg, best_metrics, notes = autotune_best(shape, self.candidates, evaluator, budget)
+        best_cfg, best_metrics, notes = autotune_best(
+            shape,
+            self.candidates,
+            evaluator,
+            budget,
+            batch_evaluator=batch_evaluator,
+        )
         tune_time_ms = (time.perf_counter() - t0) * 1000.0
 
         self.cache[shape] = best_cfg

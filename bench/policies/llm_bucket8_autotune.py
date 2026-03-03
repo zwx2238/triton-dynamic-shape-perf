@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 from bench.configs.base_configs import MatmulConfig
-from bench.policies.common import BudgetTracker, EvaluatorFn, SelectionResult, autotune_best
+from bench.policies.common import BatchEvaluatorFn, BudgetTracker, EvaluatorFn, SelectionResult, autotune_best
 
 Shape = Tuple[int, int, int]
 LlmBucket8Key = int
@@ -52,7 +52,13 @@ class LlmBucket8AutotunePolicy:
         self.n_split = int(n_split)
         self.k_split = int(k_split)
 
-    def select(self, shape: Shape, evaluator: EvaluatorFn, budget: BudgetTracker) -> SelectionResult:
+    def select(
+        self,
+        shape: Shape,
+        evaluator: EvaluatorFn,
+        budget: BudgetTracker,
+        batch_evaluator: Optional[BatchEvaluatorFn] = None,
+    ) -> SelectionResult:
         M, N, K = shape
         key = llm_bucket8_key(M, N, K, self.m_split, self.n_split, self.k_split)
         key_str = llm_bucket8_key_to_str(key)
@@ -60,7 +66,13 @@ class LlmBucket8AutotunePolicy:
             return SelectionResult(config=self.cache[key], cache_key=key_str)
 
         t0 = time.perf_counter()
-        best_cfg, best_metrics, notes = autotune_best(shape, self.candidates, evaluator, budget)
+        best_cfg, best_metrics, notes = autotune_best(
+            shape,
+            self.candidates,
+            evaluator,
+            budget,
+            batch_evaluator=batch_evaluator,
+        )
         tune_time_ms = (time.perf_counter() - t0) * 1000.0
         self.cache[key] = best_cfg
         return SelectionResult(

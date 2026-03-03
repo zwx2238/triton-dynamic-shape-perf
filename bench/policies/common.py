@@ -9,6 +9,7 @@ from bench.configs.base_configs import MatmulConfig, get_default_config
 Shape = Tuple[int, int, int]
 Metrics = Dict[str, object]
 EvaluatorFn = Callable[[Shape, MatmulConfig], Metrics]
+BatchEvaluatorFn = Callable[[Shape, Sequence[MatmulConfig]], Sequence[Metrics]]
 
 
 @dataclass
@@ -43,28 +44,49 @@ def autotune_best(
     candidates: Sequence[MatmulConfig],
     evaluator: EvaluatorFn,
     budget: BudgetTracker,
+    batch_evaluator: Optional[BatchEvaluatorFn] = None,
 ) -> tuple[MatmulConfig, Optional[Metrics], str]:
     best_cfg: Optional[MatmulConfig] = None
     best_metrics: Optional[Metrics] = None
     notes = []
 
-    for cfg in candidates:
-        if budget.exceeded():
-            notes.append("budget_exceeded")
-            break
-        metrics = evaluator(shape, cfg)
-        if int(metrics.get("invalid_config", 0)) == 1:
-            continue
-        if best_metrics is None:
-            best_cfg = cfg
-            best_metrics = metrics
-            continue
+    if batch_evaluator is not None and not budget.exceeded():
+        metrics_seq = list(batch_evaluator(shape, candidates))
+        if len(metrics_seq) == len(candidates):
+            notes.append("batch_tune")
+            for cfg, metrics in zip(candidates, metrics_seq):
+                if int(metrics.get("invalid_config", 0)) == 1:
+                    continue
+                if best_metrics is None:
+                    best_cfg = cfg
+                    best_metrics = metrics
+                    continue
+                best_us = float(best_metrics.get("runtime_cost_us", 1e30))
+                curr_us = float(metrics.get("runtime_cost_us", 1e30))
+                if curr_us < best_us:
+                    best_cfg = cfg
+                    best_metrics = metrics
+        else:
+            notes.append("batch_len_mismatch_fallback_single")
 
-        best_us = float(best_metrics.get("runtime_cost_us", 1e30))
-        curr_us = float(metrics.get("runtime_cost_us", 1e30))
-        if curr_us < best_us:
-            best_cfg = cfg
-            best_metrics = metrics
+    if best_cfg is None:
+        for cfg in candidates:
+            if budget.exceeded():
+                notes.append("budget_exceeded")
+                break
+            metrics = evaluator(shape, cfg)
+            if int(metrics.get("invalid_config", 0)) == 1:
+                continue
+            if best_metrics is None:
+                best_cfg = cfg
+                best_metrics = metrics
+                continue
+
+            best_us = float(best_metrics.get("runtime_cost_us", 1e30))
+            curr_us = float(metrics.get("runtime_cost_us", 1e30))
+            if curr_us < best_us:
+                best_cfg = cfg
+                best_metrics = metrics
 
     if best_cfg is None:
         fallback = get_default_config()

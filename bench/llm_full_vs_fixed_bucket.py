@@ -396,6 +396,7 @@ def main() -> None:
         tune_timing_mode = "event"
         eval_timing_mode = "event"
     use_profiler_batch_eval = device_type == "npu" and eval_timing_mode == "profiler"
+    use_profiler_batch_tune = device_type == "npu" and tune_timing_mode == "profiler"
 
     def triton_eval_tune(shape: Shape, cfg: MatmulConfig) -> Dict[str, object]:
         if triton_evaluator is None:
@@ -406,6 +407,12 @@ def main() -> None:
         if triton_evaluator is None:
             raise RuntimeError("内部错误：缺少 triton evaluator")
         return triton_evaluator.evaluate(shape, cfg, timing_mode=eval_timing_mode)
+
+    def triton_eval_tune_batch(shape: Shape, cfgs: Sequence[MatmulConfig]) -> list[Dict[str, object]]:
+        if triton_evaluator is None:
+            raise RuntimeError("内部错误：缺少 triton evaluator")
+        entries = [(shape, cfg) for cfg in cfgs]
+        return triton_evaluator.evaluate_batch(entries, timing_mode=tune_timing_mode)
 
     def torch_eval_tune(shape: Shape) -> Dict[str, object]:
         if torch_evaluator is None:
@@ -428,7 +435,12 @@ def main() -> None:
             for i, shape in enumerate(tune_set):
                 if budget.exceeded():
                     break
-                sel = policy.select(shape, triton_eval_tune, budget)
+                sel = policy.select(
+                    shape,
+                    triton_eval_tune,
+                    budget,
+                    batch_evaluator=triton_eval_tune_batch if use_profiler_batch_tune else None,
+                )
                 met = sel.premeasure if sel.premeasure is not None else triton_eval_tune(shape, sel.config)
                 rows.append(
                     _make_record(
@@ -448,7 +460,12 @@ def main() -> None:
             for i, shape in enumerate(eval_set):
                 if budget.exceeded():
                     break
-                sel = policy.select(shape, triton_eval_tune, budget)
+                sel = policy.select(
+                    shape,
+                    triton_eval_tune,
+                    budget,
+                    batch_evaluator=triton_eval_tune_batch if use_profiler_batch_tune else None,
+                )
                 if use_profiler_batch_eval:
                     rows.append(
                         _make_record(
@@ -518,7 +535,12 @@ def main() -> None:
             for i, shape in enumerate(tune_set):
                 if budget.exceeded():
                     break
-                sel = policy.select(shape, triton_eval_tune, budget)
+                sel = policy.select(
+                    shape,
+                    triton_eval_tune,
+                    budget,
+                    batch_evaluator=triton_eval_tune_batch if use_profiler_batch_tune else None,
+                )
                 met = sel.premeasure if sel.premeasure is not None else triton_eval_tune(shape, sel.config)
                 rows.append(
                     _make_record(
@@ -546,7 +568,12 @@ def main() -> None:
             for i, shape in enumerate(eval_set):
                 if budget.exceeded():
                     break
-                sel = policy.select(shape, triton_eval_tune, budget)
+                sel = policy.select(
+                    shape,
+                    triton_eval_tune,
+                    budget,
+                    batch_evaluator=triton_eval_tune_batch if use_profiler_batch_tune else None,
+                )
                 if sel.tune_time_ms > 0:
                     raise RuntimeError("BUG: bucket policy 在 eval 阶段发生了调参")
                 if use_profiler_batch_eval:
@@ -611,24 +638,47 @@ def main() -> None:
             if torch_evaluator is None:
                 raise RuntimeError("内部错误：TORCH 需要 Torch evaluator")
             torch_cfg = torch_evaluator.get_torch_config_id()
+            tune_items: List[tuple[int, Shape]] = []
             for i, shape in enumerate(tune_set):
                 if budget.exceeded():
                     break
-                met = torch_eval_tune(shape)
-                rows.append(
-                    _make_torch_record(
-                        "tune",
-                        i,
-                        shape,
-                        met,
-                        args.dtype,
-                        gpu,
-                        torch_cfg,
-                        args.bucket_m_split,
-                        args.bucket_n_split,
-                        args.bucket_k_split,
+                if use_profiler_batch_tune:
+                    tune_items.append((i, shape))
+                else:
+                    met = torch_eval_tune(shape)
+                    rows.append(
+                        _make_torch_record(
+                            "tune",
+                            i,
+                            shape,
+                            met,
+                            args.dtype,
+                            gpu,
+                            torch_cfg,
+                            args.bucket_m_split,
+                            args.bucket_n_split,
+                            args.bucket_k_split,
+                        )
                     )
-                )
+
+            if use_profiler_batch_tune and tune_items:
+                tune_shapes = [shape for _, shape in tune_items]
+                tune_metrics = torch_evaluator.evaluate_batch(tune_shapes, timing_mode=tune_timing_mode)
+                for (i, shape), met in zip(tune_items, tune_metrics):
+                    rows.append(
+                        _make_torch_record(
+                            "tune",
+                            i,
+                            shape,
+                            met,
+                            args.dtype,
+                            gpu,
+                            torch_cfg,
+                            args.bucket_m_split,
+                            args.bucket_n_split,
+                            args.bucket_k_split,
+                        )
+                    )
 
             eval_items: List[tuple[int, Shape]] = []
             for i, shape in enumerate(eval_set):
@@ -684,7 +734,13 @@ def main() -> None:
                 raise RuntimeError("内部错误：ONEKEY 需要 Triton evaluator")
             rep_shape = _pick_representative_shape(tune_set)
             t0 = time.perf_counter()
-            best_cfg, best_metrics, notes = autotune_best(rep_shape, candidates, triton_eval_tune, budget)
+            best_cfg, best_metrics, notes = autotune_best(
+                rep_shape,
+                candidates,
+                triton_eval_tune,
+                budget,
+                batch_evaluator=triton_eval_tune_batch if use_profiler_batch_tune else None,
+            )
             rep_tune_ms = (time.perf_counter() - t0) * 1000.0
             if best_metrics is None:
                 best_metrics = triton_eval_tune(rep_shape, best_cfg)

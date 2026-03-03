@@ -39,6 +39,17 @@ def _extract_timing(notes: str) -> str:
     return ""
 
 
+def _timing_family(timing: str) -> str:
+    t = (timing or "").strip().lower()
+    if not t:
+        return ""
+    if t == "event" or "fallback_event" in t or "host_perf_counter" in t:
+        return "event"
+    if "profiler" in t:
+        return "profiler"
+    return "unknown"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="按 case 对齐各方法 runtime_cost_us，生成对比 CSV。")
     parser.add_argument("--input-csv", type=str, required=True, help="llm_full_vs_bucket 原始结果 CSV")
@@ -96,10 +107,15 @@ def main() -> None:
     if not args.allow_mixed_metric:
         problems: List[str] = []
         for m in methods:
-            tune_set = timing_by_method_split.get((m, "tune"), set())
-            eval_set = timing_by_method_split.get((m, args.split), set())
-            if tune_set and eval_set and tune_set != eval_set:
-                problems.append(f"{m}: tune={sorted(tune_set)} eval={sorted(eval_set)}")
+            tune_raw = timing_by_method_split.get((m, "tune"), set())
+            eval_raw = timing_by_method_split.get((m, args.split), set())
+            tune_family = {x for x in (_timing_family(t) for t in tune_raw) if x}
+            eval_family = {x for x in (_timing_family(t) for t in eval_raw) if x}
+            if tune_family and eval_family and tune_family != eval_family:
+                problems.append(
+                    f"{m}: tune_family={sorted(tune_family)} eval_family={sorted(eval_family)} "
+                    f"(raw tune={sorted(tune_raw)} raw eval={sorted(eval_raw)})"
+                )
         if problems:
             raise RuntimeError(
                 "检测到口径混用（tune/eval timing 不一致），拒绝生成 compare CSV。\n"
