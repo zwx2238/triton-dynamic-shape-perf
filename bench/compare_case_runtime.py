@@ -29,6 +29,16 @@ def _shape_sort_key(shape_id: str) -> Tuple[int, str]:
     return (10**9, shape_id)
 
 
+def _extract_timing(notes: str) -> str:
+    if not notes:
+        return ""
+    for part in str(notes).split(";"):
+        p = part.strip()
+        if p.startswith("timing="):
+            return p[len("timing=") :]
+    return ""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="按 case 对齐各方法 runtime_cost_us，生成对比 CSV。")
     parser.add_argument("--input-csv", type=str, required=True, help="llm_full_vs_bucket 原始结果 CSV")
@@ -41,6 +51,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--baseline", type=str, default="FULL", help="默认: FULL")
     parser.add_argument("--out-csv", type=str, default="", help="默认: <input_stem>_case_compare_<split>.csv")
+    parser.add_argument(
+        "--allow-mixed-metric",
+        action="store_true",
+        help="允许 tune/eval 计时口径不一致（默认不允许）",
+    )
     return parser.parse_args()
 
 
@@ -65,6 +80,32 @@ def main() -> None:
     methods = args.methods or sorted({r.get("method", "") for r in filtered if r.get("method", "")})
     if not methods:
         raise RuntimeError("没有可用方法")
+
+    timing_by_method_split: Dict[Tuple[str, str], set[str]] = {}
+    for row in rows:
+        method = row.get("method", "")
+        split = row.get("split", "")
+        if method not in methods:
+            continue
+        timing = _extract_timing(row.get("notes", ""))
+        if not timing:
+            continue
+        key = (method, split)
+        timing_by_method_split.setdefault(key, set()).add(timing)
+
+    if not args.allow_mixed_metric:
+        problems: List[str] = []
+        for m in methods:
+            tune_set = timing_by_method_split.get((m, "tune"), set())
+            eval_set = timing_by_method_split.get((m, args.split), set())
+            if tune_set and eval_set and tune_set != eval_set:
+                problems.append(f"{m}: tune={sorted(tune_set)} eval={sorted(eval_set)}")
+        if problems:
+            raise RuntimeError(
+                "检测到口径混用（tune/eval timing 不一致），拒绝生成 compare CSV。\n"
+                + "\n".join(problems)
+                + "\n如需强制继续，请加 --allow-mixed-metric"
+            )
 
     key_fields = ("shape_id", "M", "N", "K", "dtype", "gpu", "bucket_m", "bucket_n", "bucket_k")
     table: Dict[Tuple[str, ...], Dict[str, str]] = {}
@@ -94,11 +135,13 @@ def main() -> None:
         out[f"p99_us_{method}"] = row.get("p99_us", "")
         out[f"config_id_{method}"] = row.get("config_id", "")
         out[f"invalid_config_{method}"] = row.get("invalid_config", "")
+        out[f"timing_source_{method}"] = _extract_timing(row.get("notes", ""))
 
     runtime_cols = [f"runtime_cost_us_{m}" for m in methods]
     p99_cols = [f"p99_us_{m}" for m in methods]
     cfg_cols = [f"config_id_{m}" for m in methods]
     invalid_cols = [f"invalid_config_{m}" for m in methods]
+    timing_cols = [f"timing_source_{m}" for m in methods]
 
     ratio_cols: List[str] = []
     delta_cols: List[str] = []
@@ -145,6 +188,7 @@ def main() -> None:
         *p99_cols,
         *cfg_cols,
         *invalid_cols,
+        *timing_cols,
         *ratio_cols,
         *delta_cols,
     ]
@@ -163,4 +207,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
