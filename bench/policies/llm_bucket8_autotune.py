@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import bisect
 import time
 from typing import Dict, Sequence, Tuple
 
@@ -9,42 +8,28 @@ from bench.policies.common import BudgetTracker, EvaluatorFn, SelectionResult, a
 
 Shape = Tuple[int, int, int]
 LlmBucket8Key = int
+DEFAULT_M_SPLIT = 16
+DEFAULT_N_SPLIT = 4096
+DEFAULT_K_SPLIT = 6144
 
-M_VALUES = [1, 2, 4, 8, 16, 32, 64]
-K_VALUES = [1024, 1536, 2048, 3072, 4096, 6144, 8192]
-M_TO_INDEX = {v: i for i, v in enumerate(M_VALUES)}
-K_TO_INDEX = {v: i for i, v in enumerate(K_VALUES)}
+def llm_bucket8_key(
+    M: int,
+    N: int,
+    K: int,
+    m_split: int = DEFAULT_M_SPLIT,
+    n_split: int = DEFAULT_N_SPLIT,
+    k_split: int = DEFAULT_K_SPLIT,
+) -> LlmBucket8Key:
+    """8-bucket heuristic with 3 binary splits on M/N/K.
 
-# 固定的 49 -> 8 桶映射
-# 行: M_VALUES 顺序, 列: K_VALUES 顺序
-LLM_BUCKET8_TABLE = [
-    [1, 1, 2, 2, 2, 2, 0],
-    [6, 6, 2, 2, 2, 2, 2],
-    [6, 6, 2, 2, 2, 2, 2],
-    [6, 6, 2, 2, 2, 2, 2],
-    [6, 7, 2, 2, 2, 2, 2],
-    [6, 6, 2, 2, 2, 2, 2],
-    [6, 4, 3, 3, 3, 5, 7],
-]
-
-
-def _value_index(values: Sequence[int], lookup: Dict[int, int], x: int) -> int:
-    idx = lookup.get(x)
-    if idx is not None:
-        return idx
-    # 对分布外值，使用 <=x 的最近离散点（最小值以下则取 0）
-    pos = bisect.bisect_right(values, x) - 1
-    if pos < 0:
-        return 0
-    if pos >= len(values):
-        return len(values) - 1
-    return pos
-
-
-def llm_bucket8_key(M: int, K: int) -> LlmBucket8Key:
-    mi = _value_index(M_VALUES, M_TO_INDEX, M)
-    ki = _value_index(K_VALUES, K_TO_INDEX, K)
-    return int(LLM_BUCKET8_TABLE[mi][ki])
+    bit2: M <= m_split
+    bit1: N <= n_split
+    bit0: K <= k_split
+    """
+    b2 = 1 if M <= m_split else 0
+    b1 = 1 if N <= n_split else 0
+    b0 = 1 if K <= k_split else 0
+    return (b2 << 2) | (b1 << 1) | b0
 
 
 def llm_bucket8_key_to_str(key: LlmBucket8Key) -> str:
@@ -54,13 +39,22 @@ def llm_bucket8_key_to_str(key: LlmBucket8Key) -> str:
 class LlmBucket8AutotunePolicy:
     method = "B8"
 
-    def __init__(self, candidates: Sequence[MatmulConfig]) -> None:
+    def __init__(
+        self,
+        candidates: Sequence[MatmulConfig],
+        m_split: int = DEFAULT_M_SPLIT,
+        n_split: int = DEFAULT_N_SPLIT,
+        k_split: int = DEFAULT_K_SPLIT,
+    ) -> None:
         self.candidates = list(candidates)
         self.cache: Dict[LlmBucket8Key, MatmulConfig] = {}
+        self.m_split = int(m_split)
+        self.n_split = int(n_split)
+        self.k_split = int(k_split)
 
     def select(self, shape: Shape, evaluator: EvaluatorFn, budget: BudgetTracker) -> SelectionResult:
-        M, _, K = shape
-        key = llm_bucket8_key(M, K)
+        M, N, K = shape
+        key = llm_bucket8_key(M, N, K, self.m_split, self.n_split, self.k_split)
         key_str = llm_bucket8_key_to_str(key)
         if key in self.cache:
             return SelectionResult(config=self.cache[key], cache_key=key_str)
