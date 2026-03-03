@@ -6,13 +6,12 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, Tuple
 
 import torch
-from bench.kernels.backend_runtime import (
+from bench.kernels.npu_measure import (
     get_device_name,
     measure_latencies_us,
     profile_npu_step_launches_us,
     resolve_device,
     synchronize,
-    torch_mm_config_id,
 )
 
 Shape = Tuple[int, int, int]
@@ -22,8 +21,6 @@ Shape = Tuple[int, int, int]
 class EvalMetrics:
     compile_time_ms: float
     runtime_cost_us: float
-    p99_us: float
-    runtime_perf_tflops: float
     invalid_config: int
     notes: str
 
@@ -31,8 +28,6 @@ class EvalMetrics:
         return {
             "compile_time_ms": self.compile_time_ms,
             "runtime_cost_us": self.runtime_cost_us,
-            "p99_us": self.p99_us,
-            "runtime_perf_tflops": self.runtime_perf_tflops,
             "invalid_config": self.invalid_config,
             "notes": self.notes,
         }
@@ -53,23 +48,25 @@ def _percentile(values: list[float], pct: float) -> float:
     return ordered[lo] * (1.0 - frac) + ordered[hi] * frac
 
 
+def _torch_mm_config_id(device: torch.device) -> str:
+    return f"torch_mm_{device.type}"
+
+
 class TorchMatmulEvaluator:
     """Torch baseline via torch.mm."""
 
     def __init__(
         self,
         dtype: str = "bf16",
-        device: str = "auto",
+        device: str = "npu",
         warmup: int = 10,
         repeat: int = 50,
-        npu_timing: str = "event",
     ) -> None:
         self.dtype_name = dtype
         self.dtype = self._parse_dtype(dtype)
         self.device = resolve_device(device)
         self.warmup = int(warmup)
         self.repeat = int(repeat)
-        self.npu_timing = npu_timing
 
         self._first_launch_done = False
         self._cached_shape: Optional[Shape] = None
@@ -115,12 +112,10 @@ class TorchMatmulEvaluator:
         return get_device_name(self.device)
 
     def get_torch_config_id(self) -> str:
-        return torch_mm_config_id(self.device)
+        return _torch_mm_config_id(self.device)
 
-    def evaluate(self, shape: Shape, timing_mode: str | None = None) -> Dict[str, object]:
-        M, N, K = shape
+    def evaluate(self, shape: Shape) -> Dict[str, object]:
         compile_time_ms = 0.0
-        active_timing_mode = timing_mode or self.npu_timing
 
         try:
             a, b, c = self._get_tensors(shape)
@@ -140,21 +135,14 @@ class TorchMatmulEvaluator:
                 self.device,
                 self.repeat,
                 lambda: self._launch(a, b, c),
-                npu_timing=active_timing_mode,
             )
 
             p50_us = _percentile(latencies_us, 50)
-            p99_us = _percentile(latencies_us, 99)
-            tflops = 0.0
-            if p50_us > 0:
-                tflops = (2.0 * M * N * K) / (p50_us / 1_000_000.0) / 1e12
 
             note = f"{self.get_torch_config_id()};timing={timing_note}"
             return EvalMetrics(
                 compile_time_ms=compile_time_ms,
                 runtime_cost_us=p50_us,
-                p99_us=p99_us,
-                runtime_perf_tflops=tflops,
                 invalid_config=0,
                 notes=note,
             ).to_dict()
@@ -162,18 +150,13 @@ class TorchMatmulEvaluator:
             return EvalMetrics(
                 compile_time_ms=compile_time_ms,
                 runtime_cost_us=0.0,
-                p99_us=0.0,
-                runtime_perf_tflops=0.0,
                 invalid_config=1,
                 notes=f"{type(exc).__name__}: {exc}",
             ).to_dict()
 
-    def evaluate_batch(self, shapes: Sequence[Shape], timing_mode: str | None = None) -> list[Dict[str, object]]:
-        active_timing_mode = timing_mode or self.npu_timing
+    def evaluate_batch(self, shapes: Sequence[Shape]) -> list[Dict[str, object]]:
         if not shapes:
             return []
-        if self.device.type != "npu" or active_timing_mode != "profiler":
-            return [self.evaluate(shape, timing_mode=active_timing_mode) for shape in shapes]
 
         try:
             ordered_unique = list(dict.fromkeys(shapes))
@@ -205,20 +188,15 @@ class TorchMatmulEvaluator:
 
             step_latencies, timing_note = profile_npu_step_launches_us(self.device, step_launches)
             if len(step_latencies) < len(shapes) * self.repeat:
-                return [self.evaluate(shape, timing_mode=active_timing_mode) for shape in shapes]
+                return [self.evaluate(shape) for shape in shapes]
 
             out: list[Dict[str, object]] = []
             for idx, shape in enumerate(shapes):
                 start = idx * self.repeat
                 end = start + self.repeat
                 latencies = step_latencies[start:end]
-                M, N, K = shape
 
                 p50_us = _percentile(latencies, 50)
-                p99_us = _percentile(latencies, 99)
-                tflops = 0.0
-                if p50_us > 0:
-                    tflops = (2.0 * M * N * K) / (p50_us / 1_000_000.0) / 1e12
 
                 note = f"{self.get_torch_config_id()};timing={timing_note}"
                 compile_time_ms = compile_time_ms_first if idx == 0 else 0.0
@@ -226,12 +204,10 @@ class TorchMatmulEvaluator:
                     EvalMetrics(
                         compile_time_ms=compile_time_ms,
                         runtime_cost_us=p50_us,
-                        p99_us=p99_us,
-                        runtime_perf_tflops=tflops,
                         invalid_config=0,
                         notes=note,
                     ).to_dict()
                 )
             return out
         except Exception:  # noqa: BLE001
-            return [self.evaluate(shape, timing_mode=active_timing_mode) for shape in shapes]
+            return [self.evaluate(shape) for shape in shapes]

@@ -1,3 +1,0 @@
-method,tune_rows,tuned_nonzero,total_tune_ms,total_compile_ms
-FULL,64,58,12608.565000,2.301735
-BUCKET,64,8,2838.632000,0.000000

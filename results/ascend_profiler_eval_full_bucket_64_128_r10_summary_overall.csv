@@ -1,3 +1,0 @@
-method,samples,p50_runtime_us,mean_runtime_us,p99_us_median,mean_tflops,speedup_vs_full
-FULL,128,49.021500,50.322484,70.368510,13.863146,1.000000
-BUCKET,128,50.896500,58.355688,74.496790,14.345728,0.963161

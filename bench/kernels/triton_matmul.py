@@ -11,7 +11,7 @@ import triton
 import triton.language as tl
 
 from bench.configs.base_configs import MatmulConfig
-from bench.kernels.backend_runtime import (
+from bench.kernels.npu_measure import (
     align_ascend_toolchain_env,
     get_device_name,
     measure_latencies_us,
@@ -91,8 +91,6 @@ def _matmul_kernel(
 class EvalMetrics:
     compile_time_ms: float
     runtime_cost_us: float
-    p99_us: float
-    runtime_perf_tflops: float
     invalid_config: int
     notes: str
 
@@ -100,8 +98,6 @@ class EvalMetrics:
         return {
             "compile_time_ms": self.compile_time_ms,
             "runtime_cost_us": self.runtime_cost_us,
-            "p99_us": self.p99_us,
-            "runtime_perf_tflops": self.runtime_perf_tflops,
             "invalid_config": self.invalid_config,
             "notes": self.notes,
         }
@@ -126,17 +122,15 @@ class TritonMatmulEvaluator:
     def __init__(
         self,
         dtype: str = "bf16",
-        device: str = "auto",
+        device: str = "npu",
         warmup: int = 10,
         repeat: int = 50,
-        npu_timing: str = "event",
     ) -> None:
         self.dtype_name = dtype
         self.dtype = self._parse_dtype(dtype)
         self.device = resolve_device(device)
         self.warmup = int(warmup)
         self.repeat = int(repeat)
-        self.npu_timing = npu_timing
         self.env_notes = ""
         default_cores = 20
         device_name_hint = str(get_device_name(self.device))
@@ -145,8 +139,7 @@ class TritonMatmulEvaluator:
         self.ascend_num_cores = int(os.environ.get("TRITON_ASCEND_NUM_CORES", str(default_cores)))
         self.ascend_swizzle_group = 4
 
-        if self.device.type == "npu":
-            self.env_notes = align_ascend_toolchain_env()
+        self.env_notes = align_ascend_toolchain_env()
 
         self.compile_cache: set[tuple[str, str, str]] = set()
         self._cached_shape: Optional[Shape] = None
@@ -193,18 +186,9 @@ class TritonMatmulEvaluator:
         _, N = b.shape
 
         total_blocks = triton.cdiv(M, cfg.BLOCK_M) * triton.cdiv(N, cfg.BLOCK_N)
-        if self.device.type == "npu":
-            launch_programs = max(1, min(self.ascend_num_cores, total_blocks))
-            swizzle_group = self.ascend_swizzle_group
-            swizzle_direction = 1 if M < N else 0
-            launch_num_warps = 4
-            launch_num_stages = 2
-        else:
-            launch_programs = max(1, total_blocks)
-            swizzle_group = max(1, int(cfg.GROUP_M))
-            swizzle_direction = 0
-            launch_num_warps = cfg.num_warps
-            launch_num_stages = cfg.num_stages
+        launch_programs = max(1, min(self.ascend_num_cores, total_blocks))
+        swizzle_group = self.ascend_swizzle_group
+        swizzle_direction = 1 if M < N else 0
 
         grid = (launch_programs,)
 
@@ -227,25 +211,18 @@ class TritonMatmulEvaluator:
             SWIZZLE_GROUP=swizzle_group,
             SWIZZLE_DIRECTION=swizzle_direction,
             NUM_CORES=launch_programs,
-            num_warps=launch_num_warps,
-            num_stages=launch_num_stages,
         )
     
     def _kernel_launch_note(self, shape: Shape, cfg: MatmulConfig) -> str:
         M, N, _ = shape
         total_blocks = triton.cdiv(M, cfg.BLOCK_M) * triton.cdiv(N, cfg.BLOCK_N)
-        if self.device.type == "npu":
-            launch_programs = max(1, min(self.ascend_num_cores, total_blocks))
-            swizzle_group = self.ascend_swizzle_group
-            swizzle_direction = 1 if M < N else 0
-            return f"launch=fixed_cores({launch_programs}),swizzle2d_g={swizzle_group},dir={swizzle_direction}"
-        launch_programs = max(1, total_blocks)
-        return f"launch=all_blocks({launch_programs})"
+        launch_programs = max(1, min(self.ascend_num_cores, total_blocks))
+        swizzle_group = self.ascend_swizzle_group
+        swizzle_direction = 1 if M < N else 0
+        return f"launch=fixed_cores({launch_programs}),swizzle2d_g={swizzle_group},dir={swizzle_direction}"
 
-    def evaluate(self, shape: Shape, cfg: MatmulConfig, timing_mode: str | None = None) -> Dict[str, object]:
-        M, N, K = shape
+    def evaluate(self, shape: Shape, cfg: MatmulConfig) -> Dict[str, object]:
         compile_time_ms = 0.0
-        active_timing_mode = timing_mode or self.npu_timing
         compile_key = (
             str(self.device),
             self.dtype_name,
@@ -270,14 +247,9 @@ class TritonMatmulEvaluator:
                 self.device,
                 self.repeat,
                 lambda: self._launch(a, b, c, cfg),
-                npu_timing=active_timing_mode,
             )
 
             p50_us = _percentile(latencies_us, 50)
-            p99_us = _percentile(latencies_us, 99)
-            tflops = 0.0
-            if p50_us > 0:
-                tflops = (2.0 * M * N * K) / (p50_us / 1_000_000.0) / 1e12
 
             note_parts = []
             if self.env_notes:
@@ -287,8 +259,6 @@ class TritonMatmulEvaluator:
             return EvalMetrics(
                 compile_time_ms=compile_time_ms,
                 runtime_cost_us=p50_us,
-                p99_us=p99_us,
-                runtime_perf_tflops=tflops,
                 invalid_config=0,
                 notes=";".join(note_parts),
             ).to_dict()
@@ -299,8 +269,6 @@ class TritonMatmulEvaluator:
             return EvalMetrics(
                 compile_time_ms=compile_time_ms,
                 runtime_cost_us=0.0,
-                p99_us=0.0,
-                runtime_perf_tflops=0.0,
                 invalid_config=1,
                 notes=note,
             ).to_dict()
@@ -308,13 +276,9 @@ class TritonMatmulEvaluator:
     def evaluate_batch(
         self,
         entries: Sequence[tuple[Shape, MatmulConfig]],
-        timing_mode: str | None = None,
     ) -> list[Dict[str, object]]:
-        active_timing_mode = timing_mode or self.npu_timing
         if not entries:
             return []
-        if self.device.type != "npu" or active_timing_mode != "profiler":
-            return [self.evaluate(shape, cfg, timing_mode=active_timing_mode) for shape, cfg in entries]
 
         try:
             ordered_shapes = list(dict.fromkeys(shape for shape, _ in entries))
@@ -354,20 +318,15 @@ class TritonMatmulEvaluator:
 
             step_latencies, timing_note = profile_npu_step_launches_us(self.device, step_launches)
             if len(step_latencies) < len(entries) * self.repeat:
-                return [self.evaluate(shape, cfg, timing_mode=active_timing_mode) for shape, cfg in entries]
+                return [self.evaluate(shape, cfg) for shape, cfg in entries]
 
             out: list[Dict[str, object]] = []
             for idx, (shape, _) in enumerate(entries):
                 start = idx * self.repeat
                 end = start + self.repeat
                 latencies = step_latencies[start:end]
-                M, N, K = shape
 
                 p50_us = _percentile(latencies, 50)
-                p99_us = _percentile(latencies, 99)
-                tflops = 0.0
-                if p50_us > 0:
-                    tflops = (2.0 * M * N * K) / (p50_us / 1_000_000.0) / 1e12
 
                 note_parts = []
                 if self.env_notes:
@@ -379,12 +338,10 @@ class TritonMatmulEvaluator:
                     EvalMetrics(
                         compile_time_ms=compile_time_by_index[idx],
                         runtime_cost_us=p50_us,
-                        p99_us=p99_us,
-                        runtime_perf_tflops=tflops,
                         invalid_config=0,
                         notes=";".join(note_parts),
                     ).to_dict()
                 )
             return out
         except Exception:  # noqa: BLE001
-            return [self.evaluate(shape, cfg, timing_mode=active_timing_mode) for shape, cfg in entries]
+            return [self.evaluate(shape, cfg) for shape, cfg in entries]

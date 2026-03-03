@@ -1,5 +1,0 @@
-status=done
-stage=all_done
-updated_at=2026-03-03T14:00:57Z
-run_dir=results/pipeline_live_t16e16
-log_file=results/pipeline_live_t16e16/pipeline.log

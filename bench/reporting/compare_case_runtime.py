@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+
+def _to_float(text: str) -> float:
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _to_int(text: str) -> int:
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _shape_sort_key(shape_id: str) -> Tuple[int, str]:
+    if not shape_id:
+        return (10**9, "")
+    tail = shape_id.split("_")[-1]
+    if tail.isdigit():
+        return (int(tail), shape_id)
+    return (10**9, shape_id)
+
+
+def _extract_timing(notes: str) -> str:
+    if not notes:
+        return ""
+    for part in str(notes).split(";"):
+        p = part.strip()
+        if p.startswith("timing="):
+            return p[len("timing=") :]
+    return ""
+
+
+def _timing_family(timing: str) -> str:
+    t = (timing or "").strip().lower()
+    if not t:
+        return ""
+    if "profiler" in t:
+        return "profiler"
+    return "unknown"
+
+
+def compare_case_runtime(
+    input_csv: Path,
+    *,
+    split: str = "eval",
+    out_csv: Path | None = None,
+    allow_mixed_metric: bool = False,
+) -> tuple[Path, int]:
+    if not input_csv.exists():
+        raise FileNotFoundError(f"找不到输入文件: {input_csv}")
+
+    if out_csv is None:
+        out_csv = input_csv.with_name(f"{input_csv.stem}_case_compare_{split}.csv")
+
+    with input_csv.open("r", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    filtered = [r for r in rows if r.get("split", "") == split]
+    if not filtered:
+        raise RuntimeError(f"在 split={split} 下没有数据")
+
+    methods = ["TORCH", "BUCKET"]
+
+    timing_by_method_split: Dict[Tuple[str, str], set[str]] = {}
+    for row in rows:
+        method = row.get("method", "")
+        split = row.get("split", "")
+        if method not in methods:
+            continue
+        timing = _extract_timing(row.get("notes", ""))
+        if not timing:
+            continue
+        key = (method, split)
+        timing_by_method_split.setdefault(key, set()).add(timing)
+
+    if not allow_mixed_metric:
+        problems: List[str] = []
+        for m in methods:
+            tune_raw = timing_by_method_split.get((m, "tune"), set())
+            eval_raw = timing_by_method_split.get((m, split), set())
+            tune_family = {x for x in (_timing_family(t) for t in tune_raw) if x}
+            eval_family = {x for x in (_timing_family(t) for t in eval_raw) if x}
+            if tune_family and eval_family and tune_family != eval_family:
+                problems.append(
+                    f"{m}: tune_family={sorted(tune_family)} eval_family={sorted(eval_family)} "
+                    f"(raw tune={sorted(tune_raw)} raw eval={sorted(eval_raw)})"
+                )
+        if problems:
+            raise RuntimeError(
+                "检测到口径混用（tune/eval timing 不一致），拒绝生成 compare CSV。\n"
+                + "\n".join(problems)
+                + "\n如需强制继续，请加 --allow-mixed-metric"
+            )
+
+    key_fields = ("shape_id", "M", "N", "K", "dtype", "gpu", "bucket_m", "bucket_n", "bucket_k")
+    table: Dict[Tuple[str, ...], Dict[str, str]] = {}
+
+    for row in filtered:
+        method = row.get("method", "")
+        if method not in methods:
+            continue
+
+        key = tuple(row.get(f, "") for f in key_fields)
+        out = table.setdefault(
+            key,
+            {
+                "shape_id": row.get("shape_id", ""),
+                "M": row.get("M", ""),
+                "N": row.get("N", ""),
+                "K": row.get("K", ""),
+                "dtype": row.get("dtype", ""),
+                "gpu": row.get("gpu", ""),
+                "bucket_m": row.get("bucket_m", ""),
+                "bucket_n": row.get("bucket_n", ""),
+                "bucket_k": row.get("bucket_k", ""),
+            },
+        )
+
+        out[f"runtime_cost_us_{method}"] = row.get("runtime_cost_us", "")
+        out[f"config_id_{method}"] = row.get("config_id", "")
+        out[f"invalid_config_{method}"] = row.get("invalid_config", "")
+        out[f"timing_source_{method}"] = _extract_timing(row.get("notes", ""))
+
+    runtime_cols = [f"runtime_cost_us_{m}" for m in methods]
+    cfg_cols = [f"config_id_{m}" for m in methods]
+    invalid_cols = [f"invalid_config_{m}" for m in methods]
+    timing_cols = [f"timing_source_{m}" for m in methods]
+
+    ratio_cols: List[str] = ["ratio_BUCKET_over_TORCH"]
+    delta_cols: List[str] = ["delta_us_BUCKET_minus_TORCH"]
+
+    out_rows = list(table.values())
+    for row in out_rows:
+        base = _to_float(row.get("runtime_cost_us_TORCH", ""))
+        for m in methods:
+            if m == "TORCH":
+                continue
+            cur = _to_float(row.get(f"runtime_cost_us_{m}", ""))
+            ratio_col = f"ratio_{m}_over_TORCH"
+            delta_col = f"delta_us_{m}_minus_TORCH"
+            if base > 0 and cur > 0:
+                row[ratio_col] = f"{cur / base:.6f}"
+                row[delta_col] = f"{cur - base:.6f}"
+            else:
+                row[ratio_col] = ""
+                row[delta_col] = ""
+
+    out_rows.sort(key=lambda r: _shape_sort_key(r.get("shape_id", "")))
+
+    fieldnames = [
+        "shape_id",
+        "M",
+        "N",
+        "K",
+        "dtype",
+        "gpu",
+        "bucket_m",
+        "bucket_n",
+        "bucket_k",
+        *runtime_cols,
+        *cfg_cols,
+        *invalid_cols,
+        *timing_cols,
+        *ratio_cols,
+        *delta_cols,
+    ]
+
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(out_rows)
+    return out_csv, len(out_rows)

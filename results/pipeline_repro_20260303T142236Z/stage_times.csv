@@ -1,6 +1,0 @@
-stage,start_utc,end_utc,elapsed_sec,detail
-prototype_select,2026-03-03T14:22:36Z,2026-03-03T14:23:18Z,42,
-prototype_dedup,2026-03-03T14:23:18Z,2026-03-03T14:23:18Z,0,
-benchmark_bucket_torch,2026-03-03T14:23:18Z,2026-03-03T14:25:29Z,131,
-case_compare,2026-03-03T14:25:29Z,2026-03-03T14:25:29Z,0,
-summary,2026-03-03T14:25:30Z,2026-03-03T14:25:30Z,0,
