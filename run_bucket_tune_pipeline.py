@@ -12,6 +12,7 @@ from typing import Callable, Optional
 
 from bench.bucket_tune.runtime import build_benchmark_config, build_benchmark_state
 from bench.bucket_tune.types import BenchmarkConfig, BenchmarkOptions, BenchmarkState
+from bench.ops import list_operators
 from bench.reporting.compare_case_runtime import compare_case_runtime
 from bench.reporting.summarize_results import summarize
 from bench.stages.bucket_stage import run_bucket
@@ -33,8 +34,6 @@ def build_logger(log_file: Path) -> logging.Logger:
     logger.handlers.clear()
     logger.propagate = False
 
-    formatter = logging.Formatter("[%(asctime)s] %(message)s")
-    formatter.converter = time.gmtime
     fmt_date = "%Y-%m-%dT%H:%M:%SZ"
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
@@ -52,6 +51,7 @@ def build_logger(log_file: Path) -> logging.Logger:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="NPU BUCKET vs TORCH pipeline entry (prototype mandatory).")
+    parser.add_argument("--op", type=str, default="matmul", choices=list_operators())
     parser.add_argument("--dtype", type=str, default="fp16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--tune-size", type=int, default=16)
     parser.add_argument("--eval-size", type=int, default=16)
@@ -59,9 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repeat", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260302)
-    parser.add_argument("--bucket-m-split", type=int, default=4)
-    parser.add_argument("--bucket-n-split", type=int, default=2048)
-    parser.add_argument("--bucket-k-split", type=int, default=3072)
+    parser.add_argument("--bucket-splits", type=int, nargs="+", default=[4, 2048, 3072])
     parser.add_argument("--run-dir", type=str, default="")
     return parser.parse_args()
 
@@ -130,17 +128,16 @@ class Pipeline:
             raise ValueError(f"要求 --prototype-count > 0（当前: {args.prototype_count}）")
 
         self.logger.info("run_dir=%s", self.run_dir)
-        self.logger.info("log_file=%s", self.log_file)
-        self.logger.info("status_file=%s", self.status_file)
-        self.logger.info("stage_times_csv=%s", self.stage_times_csv)
+        self.logger.info("op=%s", args.op)
         self.logger.info(
-            "params: dtype=%s tune_size=%s eval_size=%s prototype_count=%s warmup=%s repeat=%s",
+            "params: dtype=%s tune_size=%s eval_size=%s prototype_count=%s warmup=%s repeat=%s bucket_splits=%s",
             args.dtype,
             args.tune_size,
             args.eval_size,
             args.prototype_count,
             args.warmup,
             args.repeat,
+            args.bucket_splits,
         )
 
         options = BenchmarkOptions(
@@ -149,12 +146,11 @@ class Pipeline:
             tune_size=int(args.tune_size),
             eval_size=int(args.eval_size),
             seed=int(args.seed),
+            op_name=str(args.op),
             dtype=str(args.dtype),
             warmup=int(args.warmup),
             repeat=int(args.repeat),
-            bucket_m_split=int(args.bucket_m_split),
-            bucket_n_split=int(args.bucket_n_split),
-            bucket_k_split=int(args.bucket_k_split),
+            bucket_splits=tuple(args.bucket_splits),
             results_csv=str(self.main_results_csv),
             reset_results=True,
         )
@@ -170,13 +166,13 @@ class Pipeline:
             nonlocal benchmark_config
             nonlocal benchmark_state
             benchmark_config = build_benchmark_config(options)
-            benchmark_state = build_benchmark_state()
+            benchmark_state = build_benchmark_state(options.op_name)
             return f"results_csv={self.main_results_csv}"
 
         def prototype_stage() -> str:
             config, state = require_context()
             detail = run_prototype(config, state)
-            candidate_ids = ",".join(cfg.config_id for cfg in state.candidates)
+            candidate_ids = ",".join(getattr(cfg, "config_id", "?") for cfg in state.candidates)
             self.logger.info("prototype_candidate_ids=%s", candidate_ids)
             return detail
 

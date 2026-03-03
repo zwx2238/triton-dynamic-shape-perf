@@ -77,7 +77,8 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str) -> Tuple[Path, Path, 
         split = row.get("split", "")
         if split == "eval":
             eval_by_method[method].append(row)
-            eval_by_method_bucket[(method, _to_int(row, "bucket_m", -1))].append(row)
+            bk = _to_int(row, "bucket_key", -1)
+            eval_by_method_bucket[(method, bk)].append(row)
         elif split == "tune":
             tune_by_method[method].append(row)
 
@@ -140,13 +141,13 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str) -> Tuple[Path, Path, 
         )
 
     by_bucket_rows: List[Dict[str, object]] = []
-    for method, bucket in sorted(eval_by_method_bucket.keys(), key=lambda x: (x[0], x[1])):
-        bucket_rows = eval_by_method_bucket[(method, bucket)]
+    for method, bk in sorted(eval_by_method_bucket.keys(), key=lambda x: (x[0], x[1])):
+        bucket_rows = eval_by_method_bucket[(method, bk)]
         runtimes = [_to_float(r, "runtime_cost_us") for r in bucket_rows]
         by_bucket_rows.append(
             {
                 "method": method,
-                "bucket_m": bucket,
+                "bucket_key": bk,
                 "samples": len(bucket_rows),
                 "median_runtime_us": _fmt(statistics.median(runtimes) if runtimes else 0.0),
             }
@@ -168,7 +169,7 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str) -> Tuple[Path, Path, 
     )
     _write_csv(
         bucket_path,
-        ["method", "bucket_m", "samples", "median_runtime_us"],
+        ["method", "bucket_key", "samples", "median_runtime_us"],
         by_bucket_rows,
     )
 
@@ -185,7 +186,7 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str) -> Tuple[Path, Path, 
     _print_section(
         "BY BUCKET (EVAL)",
         by_bucket_rows,
-        ["method", "bucket_m", "samples", "median_runtime_us"],
+        ["method", "bucket_key", "samples", "median_runtime_us"],
     )
 
     return overall_path, tune_path, bucket_path

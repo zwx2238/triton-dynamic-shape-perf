@@ -4,39 +4,24 @@ import random
 from pathlib import Path
 from typing import Dict, List, Sequence
 
-from bench.configs.base_configs import BASE_CONFIGS, MatmulConfig
-from bench.kernels.torch_matmul import TorchMatmulEvaluator
-from bench.kernels.triton_matmul import TritonMatmulEvaluator
-from bench.policies.bucket_autotune import bucket_key
+from bench.ops import get_operator
 from bench.reporting.csv_logger import reset_csv
 
-from .shape_sets import build_eval_set, build_tune_set
-from .types import BenchmarkConfig, BenchmarkOptions, BenchmarkState, Shape
+from .types import BenchmarkConfig, BenchmarkOptions, BenchmarkState
 
 
 def build_benchmark_config(options: BenchmarkOptions) -> BenchmarkConfig:
     if options.prototype_count <= 0:
         raise ValueError(f"prototype-count 必须 > 0，当前: {options.prototype_count}")
 
+    op = get_operator(options.op_name)
     rng_tune = random.Random(options.seed + 1)
     rng_eval = random.Random(options.seed + 2)
-    tune_set = build_tune_set(
-        rng_tune,
-        options.tune_size,
-        options.bucket_m_split,
-        options.bucket_n_split,
-        options.bucket_k_split,
-    )
-    eval_set = build_eval_set(rng_eval, options.eval_size)
+    tune_set = op.make_tune_set(rng_tune, options.tune_size, options.bucket_splits)
+    eval_set = op.make_eval_set(rng_eval, options.eval_size)
 
-    eval_keys = {
-        bucket_key(s[0], s[1], s[2], options.bucket_m_split, options.bucket_n_split, options.bucket_k_split)
-        for s in eval_set
-    }
-    tune_keys = {
-        bucket_key(s[0], s[1], s[2], options.bucket_m_split, options.bucket_n_split, options.bucket_k_split)
-        for s in tune_set
-    }
+    eval_keys = {op.eval_key(s, options.bucket_splits) for s in eval_set}
+    tune_keys = {op.eval_key(s, options.bucket_splits) for s in tune_set}
     if not eval_keys.issubset(tune_keys):
         raise RuntimeError("BUG: tune key 未覆盖 eval key")
 
@@ -44,13 +29,13 @@ def build_benchmark_config(options: BenchmarkOptions) -> BenchmarkConfig:
         reset_csv(options.results_csv)
     Path(options.results_csv).parent.mkdir(parents=True, exist_ok=True)
 
-    triton_evaluator = TritonMatmulEvaluator(
+    triton_evaluator = op.create_triton_evaluator(
         dtype=options.dtype,
         device="npu",
         warmup=options.warmup,
         repeat=options.repeat,
     )
-    torch_evaluator = TorchMatmulEvaluator(
+    torch_evaluator = op.create_torch_evaluator(
         dtype=options.dtype,
         device="npu",
         warmup=options.warmup,
@@ -74,18 +59,20 @@ def build_benchmark_config(options: BenchmarkOptions) -> BenchmarkConfig:
         triton_evaluator=triton_evaluator,
         torch_evaluator=torch_evaluator,
         gpu=gpu,
+        op=op,
         prototype_report_csv=prototype_report_csv,
     )
 
 
-def build_benchmark_state() -> BenchmarkState:
-    return BenchmarkState(candidates=list(BASE_CONFIGS))
+def build_benchmark_state(op_name: str = "") -> BenchmarkState:
+    op = get_operator(op_name or "matmul")
+    return BenchmarkState(candidates=op.get_candidates())
 
 
 def eval_triton_tune_batch(
     config: BenchmarkConfig,
-    shape: Shape,
-    cfgs: Sequence[MatmulConfig],
+    shape: tuple,
+    cfgs: Sequence[object],
 ) -> List[Dict[str, object]]:
     entries = [(shape, cfg) for cfg in cfgs]
     return list(config.triton_evaluator.evaluate_batch(entries))

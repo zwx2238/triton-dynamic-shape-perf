@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Dict
+from typing import Dict, Tuple
 
-from bench.policies.bucket_autotune import bucket_key
-from bench.policies.common import SelectionResult
+from .shapes import bucket_key
 
-from .types import BenchmarkConfig, Shape
+Shape = Tuple[int, int, int]
 
 
 def _shape_id(split: str, idx: int) -> str:
@@ -14,17 +13,16 @@ def _shape_id(split: str, idx: int) -> str:
 
 
 def make_bucket_record(
-    config: BenchmarkConfig,
+    config,
     split: str,
     idx: int,
     shape: Shape,
-    selection: SelectionResult,
+    selection,
     metrics: Dict[str, object],
 ) -> Dict[str, object]:
     options = config.options
-    m_split = options.bucket_m_split
-    n_split = options.bucket_n_split
-    k_split = options.bucket_k_split
+    splits = options.bucket_splits
+    m_split, n_split, k_split = splits[0], splits[1], splits[2]
     m, n, k = shape
 
     cfg = selection.config
@@ -54,9 +52,7 @@ def make_bucket_record(
         "compile_time_ms": float(metrics.get("compile_time_ms", 0.0)),
         "tune_time_ms": round(selection.tune_time_ms, 3),
         "runtime_cost_us": float(metrics.get("runtime_cost_us", 0.0)),
-        "bucket_m": int(key),
-        "bucket_n": -1,
-        "bucket_k": -1,
+        "bucket_key": int(key),
         "cache_key": selection.cache_key,
         "invalid_config": int(metrics.get("invalid_config", 0)),
         "notes": ";".join(notes),
@@ -64,7 +60,7 @@ def make_bucket_record(
 
 
 def make_torch_record(
-    config: BenchmarkConfig,
+    config,
     split: str,
     idx: int,
     shape: Shape,
@@ -72,9 +68,8 @@ def make_torch_record(
     config_id: str,
 ) -> Dict[str, object]:
     options = config.options
-    m_split = options.bucket_m_split
-    n_split = options.bucket_n_split
-    k_split = options.bucket_k_split
+    splits = options.bucket_splits
+    m_split, n_split, k_split = splits[0], splits[1], splits[2]
     m, n, k = shape
     key = bucket_key(m, n, k, m_split, n_split, k_split)
 
@@ -96,9 +91,7 @@ def make_torch_record(
         "compile_time_ms": float(metrics.get("compile_time_ms", 0.0)),
         "tune_time_ms": 0.0,
         "runtime_cost_us": float(metrics.get("runtime_cost_us", 0.0)),
-        "bucket_m": int(key),
-        "bucket_n": -1,
-        "bucket_k": -1,
+        "bucket_key": int(key),
         "cache_key": config_id,
         "invalid_config": int(metrics.get("invalid_config", 0)),
         "notes": str(metrics.get("notes", "")),

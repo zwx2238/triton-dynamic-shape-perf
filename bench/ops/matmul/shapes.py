@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
-from bench.policies.bucket_autotune import bucket_key
+Shape = Tuple[int, int, int]
+BucketKey = int
+DistributionKey = Tuple[int, int]
 
-from .types import BucketKey, DistributionKey, Shape
+DEFAULT_M_SPLIT = 16
+DEFAULT_N_SPLIT = 4096
+DEFAULT_K_SPLIT = 6144
 
 M_BY_BIN = {
     0: [1, 2],
@@ -23,6 +27,30 @@ N_CHOICES = [1024, 1536, 2048, 3072, 4096, 6144, 8192]
 K_CHOICES = [1024, 1536, 2048, 3072, 4096, 6144, 8192]
 ALL_BUCKET_KEYS: List[BucketKey] = list(range(8))
 ALL_DISTRIBUTION_KEYS: List[DistributionKey] = [(m_bin, k_bin) for m_bin in range(4) for k_bin in range(2)]
+
+
+def bucket_key(
+    M: int,
+    N: int,
+    K: int,
+    m_split: int = DEFAULT_M_SPLIT,
+    n_split: int = DEFAULT_N_SPLIT,
+    k_split: int = DEFAULT_K_SPLIT,
+) -> BucketKey:
+    """Bucket heuristic with 3 binary splits on M/N/K.
+
+    bit2: M <= m_split
+    bit1: N <= n_split
+    bit0: K <= k_split
+    """
+    b2 = 1 if M <= m_split else 0
+    b1 = 1 if N <= n_split else 0
+    b0 = 1 if K <= k_split else 0
+    return (b2 << 2) | (b1 << 1) | b0
+
+
+def bucket_key_to_str(key: BucketKey) -> str:
+    return f"bucket_g{key}"
 
 
 def _build_bucket_candidates(m_split: int, n_split: int, k_split: int) -> Dict[BucketKey, List[Shape]]:

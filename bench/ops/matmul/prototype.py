@@ -4,12 +4,25 @@ import csv
 import math
 import statistics
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from bench.configs.base_configs import MatmulConfig
+from .configs import MatmulConfig
 from bench.policies.common import autotune_best
 
-from .types import Shape
+Shape = Tuple[int, int, int]
+
+
+def _shape_feature(shape: Shape) -> tuple[float, float, float, float]:
+    m, n, k = shape
+    lm = math.log2(max(1, m))
+    ln = math.log2(max(1, n))
+    lk = math.log2(max(1, k))
+    lr = math.log2(max(1e-9, n / k))
+    return lm, ln, lk, lr
+
+
+def _feature_dist2(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b))
 
 
 def _pick_representative_shape(shapes: Sequence[Shape]) -> Shape:
@@ -35,19 +48,6 @@ def _pick_representative_shape(shapes: Sequence[Shape]) -> Shape:
         return (lm - med_m) ** 2 + (ln - med_n) ** 2 + (lk - med_k) ** 2 + 0.5 * (lr - med_r) ** 2
 
     return min(shapes, key=_score)
-
-
-def _shape_feature(shape: Shape) -> tuple[float, float, float, float]:
-    m, n, k = shape
-    lm = math.log2(max(1, m))
-    ln = math.log2(max(1, n))
-    lk = math.log2(max(1, k))
-    lr = math.log2(max(1e-9, n / k))
-    return lm, ln, lk, lr
-
-
-def _feature_dist2(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
-    return sum((x - y) ** 2 for x, y in zip(a, b))
 
 
 def pick_typical_shapes(shapes: Sequence[Shape], count: int) -> List[Shape]:

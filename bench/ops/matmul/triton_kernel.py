@@ -10,7 +10,7 @@ import torch
 import triton
 import triton.language as tl
 
-from bench.configs.base_configs import MatmulConfig
+from .configs import MatmulConfig
 from bench.kernels.npu_measure import (
     align_ascend_toolchain_env,
     get_device_name,
@@ -212,7 +212,7 @@ class TritonMatmulEvaluator:
             SWIZZLE_DIRECTION=swizzle_direction,
             NUM_CORES=launch_programs,
         )
-    
+
     def _kernel_launch_note(self, shape: Shape, cfg: MatmulConfig) -> str:
         M, N, _ = shape
         total_blocks = triton.cdiv(M, cfg.BLOCK_M) * triton.cdiv(N, cfg.BLOCK_N)

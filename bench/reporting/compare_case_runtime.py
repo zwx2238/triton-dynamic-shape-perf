@@ -12,13 +12,6 @@ def _to_float(text: str) -> float:
         return 0.0
 
 
-def _to_int(text: str) -> int:
-    try:
-        return int(float(text))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _shape_sort_key(shape_id: str) -> Tuple[int, str]:
     if not shape_id:
         return (10**9, "")
@@ -34,7 +27,7 @@ def _extract_timing(notes: str) -> str:
     for part in str(notes).split(";"):
         p = part.strip()
         if p.startswith("timing="):
-            return p[len("timing=") :]
+            return p[len("timing="):]
     return ""
 
 
@@ -45,6 +38,12 @@ def _timing_family(timing: str) -> str:
     if "profiler" in t:
         return "profiler"
     return "unknown"
+
+
+PER_METHOD_COLS = {
+    "method", "config_id", "compile_time_ms", "tune_time_ms",
+    "runtime_cost_us", "cache_key", "invalid_config", "notes", "timestamp",
+}
 
 
 def compare_case_runtime(
@@ -61,7 +60,9 @@ def compare_case_runtime(
         out_csv = input_csv.with_name(f"{input_csv.stem}_case_compare_{split}.csv")
 
     with input_csv.open("r", newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        all_columns = list(reader.fieldnames or [])
+        rows = list(reader)
 
     filtered = [r for r in rows if r.get("split", "") == split]
     if not filtered:
@@ -72,13 +73,13 @@ def compare_case_runtime(
     timing_by_method_split: Dict[Tuple[str, str], set[str]] = {}
     for row in rows:
         method = row.get("method", "")
-        split = row.get("split", "")
+        row_split = row.get("split", "")
         if method not in methods:
             continue
         timing = _extract_timing(row.get("notes", ""))
         if not timing:
             continue
-        key = (method, split)
+        key = (method, row_split)
         timing_by_method_split.setdefault(key, set()).add(timing)
 
     if not allow_mixed_metric:
@@ -100,29 +101,17 @@ def compare_case_runtime(
                 + "\n如需强制继续，请加 --allow-mixed-metric"
             )
 
-    key_fields = ("shape_id", "M", "N", "K", "dtype", "gpu", "bucket_m", "bucket_n", "bucket_k")
-    table: Dict[Tuple[str, ...], Dict[str, str]] = {}
+    shared_cols = [c for c in all_columns if c not in PER_METHOD_COLS and c != "split"]
+
+    table: Dict[str, Dict[str, str]] = {}
 
     for row in filtered:
         method = row.get("method", "")
         if method not in methods:
             continue
 
-        key = tuple(row.get(f, "") for f in key_fields)
-        out = table.setdefault(
-            key,
-            {
-                "shape_id": row.get("shape_id", ""),
-                "M": row.get("M", ""),
-                "N": row.get("N", ""),
-                "K": row.get("K", ""),
-                "dtype": row.get("dtype", ""),
-                "gpu": row.get("gpu", ""),
-                "bucket_m": row.get("bucket_m", ""),
-                "bucket_n": row.get("bucket_n", ""),
-                "bucket_k": row.get("bucket_k", ""),
-            },
-        )
+        shape_id = row.get("shape_id", "")
+        out = table.setdefault(shape_id, {c: row.get(c, "") for c in shared_cols})
 
         out[f"runtime_cost_us_{method}"] = row.get("runtime_cost_us", "")
         out[f"config_id_{method}"] = row.get("config_id", "")
@@ -133,7 +122,6 @@ def compare_case_runtime(
     cfg_cols = [f"config_id_{m}" for m in methods]
     invalid_cols = [f"invalid_config_{m}" for m in methods]
     timing_cols = [f"timing_source_{m}" for m in methods]
-
     ratio_cols: List[str] = ["ratio_BUCKET_over_TORCH"]
     delta_cols: List[str] = ["delta_us_BUCKET_minus_TORCH"]
 
@@ -156,15 +144,7 @@ def compare_case_runtime(
     out_rows.sort(key=lambda r: _shape_sort_key(r.get("shape_id", "")))
 
     fieldnames = [
-        "shape_id",
-        "M",
-        "N",
-        "K",
-        "dtype",
-        "gpu",
-        "bucket_m",
-        "bucket_n",
-        "bucket_k",
+        *shared_cols,
         *runtime_cols,
         *cfg_cols,
         *invalid_cols,
@@ -175,7 +155,7 @@ def compare_case_runtime(
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     with out_csv.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(out_rows)
     return out_csv, len(out_rows)
