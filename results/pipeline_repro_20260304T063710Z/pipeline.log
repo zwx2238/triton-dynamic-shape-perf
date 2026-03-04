@@ -1,0 +1,30 @@
+[2026-03-04T06:37:10Z] run_dir=results/pipeline_repro_20260304T063710Z
+[2026-03-04T06:37:10Z] op=matmul
+[2026-03-04T06:37:10Z] params: dtype=fp16 tune_size=16 eval_size=16 prototype_count=4 warmup=5 repeat=10 bucket_splits=[4, 2048, 3072]
+[2026-03-04T06:37:10Z] speed_ratio_power_p=2.0
+[2026-03-04T06:37:10Z] START stage=setup_benchmark
+[2026-03-04T06:37:17Z] bucket_key_info splits=[4, 2048, 3072] reachable=[0, 1, 2, 3, 4, 5, 6, 7] unreachable=[] eval=[0, 1, 2, 3]
+[2026-03-04T06:37:17Z] END stage=setup_benchmark elapsed_sec=7
+[2026-03-04T06:37:17Z] START stage=prototype
+[2026-03-04T06:37:42Z] prototype_candidate_ids=c24,c18,c29
+[2026-03-04T06:37:42Z] END stage=prototype elapsed_sec=25
+[2026-03-04T06:37:42Z] START stage=benchmark_bucket
+[2026-03-04T06:38:20Z] END stage=benchmark_bucket elapsed_sec=37
+[2026-03-04T06:38:20Z] START stage=benchmark_full_tune
+[2026-03-04T06:40:32Z] END stage=benchmark_full_tune elapsed_sec=132
+[2026-03-04T06:40:32Z] START stage=benchmark_torch
+[2026-03-04T06:40:53Z] END stage=benchmark_torch elapsed_sec=20
+[2026-03-04T06:40:53Z] START stage=case_compare
+[2026-03-04T06:40:53Z] END stage=case_compare elapsed_sec=0
+[2026-03-04T06:40:53Z] START stage=summary
+[2026-03-04T06:40:53Z] END stage=summary elapsed_sec=0
+[2026-03-04T06:40:53Z] stage_elapsed_sec=setup_benchmark:7,prototype:25,benchmark_bucket:37,benchmark_full_tune:132,benchmark_torch:20,case_compare:0,summary:0
+[2026-03-04T06:40:53Z] TOTAL elapsed_sec=223
+[2026-03-04T06:40:53Z] DONE
+[2026-03-04T06:40:53Z] outputs:
+[2026-03-04T06:40:53Z]   - results/pipeline_repro_20260304T063710Z/prototype_best.csv
+[2026-03-04T06:40:53Z]   - results/pipeline_repro_20260304T063710Z/bucket_torch.csv
+[2026-03-04T06:40:53Z]   - results/pipeline_repro_20260304T063710Z/bucket_torch_case_compare_eval.csv
+[2026-03-04T06:40:53Z]   - results/pipeline_repro_20260304T063710Z/bucket_torch_summary_overall.csv
+[2026-03-04T06:40:53Z]   - results/pipeline_repro_20260304T063710Z/bucket_torch_summary_tune.csv
+[2026-03-04T06:40:53Z]   - results/pipeline_repro_20260304T063710Z/bucket_torch_summary_by_bucket.csv

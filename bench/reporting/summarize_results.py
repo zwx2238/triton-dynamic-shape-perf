@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import csv
+import math
 import statistics
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
+
+METHOD_ORDER = {"TORCH": 0, "BUCKET": 1, "FULL_TUNE": 2}
 
 
 def _to_float(row: Dict[str, str], key: str, default: float = 0.0) -> float:
@@ -49,6 +52,23 @@ def _shape_sort_key(shape_id: str) -> Tuple[int, str]:
     return (10**9, shape_id)
 
 
+def _method_sort_key(method: str) -> Tuple[int, str]:
+    return (METHOD_ORDER.get(method, 99), method)
+
+
+def _to_float_text(text: str) -> float:
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _power_mean(values: List[float], p: float) -> float:
+    if not values:
+        return 0.0
+    return (sum(v**p for v in values) / len(values)) ** (1.0 / p)
+
+
 def _print_section(title: str, rows: List[Dict[str, object]], headers: List[str]) -> None:
     print(f"\n=== {title} ===")
     if not rows:
@@ -69,15 +89,40 @@ def _print_section(title: str, rows: List[Dict[str, object]], headers: List[str]
         print("  ".join(str(row.get(h, "")).ljust(widths[h]) for h in headers))
 
 
-def _print_case_compare(compare_csv: Path) -> None:
+def _extract_compare_methods(fieldnames: List[str]) -> List[str]:
+    prefix = "runtime_cost_us_"
+    methods = [c[len(prefix):] for c in fieldnames if c.startswith(prefix)]
+    return sorted(set(methods), key=_method_sort_key)
+
+
+def _print_case_compare(compare_csv: Path, speed_power: float) -> None:
     if not compare_csv.exists():
         print(f"\n=== CASE COMPARE (EVAL) ===\n(missing file: {compare_csv})")
         return
 
     with compare_csv.open("r", newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        fieldnames = list(reader.fieldnames or [])
+    methods = _extract_compare_methods(fieldnames)
 
     display_rows: List[Dict[str, object]] = []
+    headers: List[str] = ["shape_id", "shape"]
+    if "TORCH" in methods:
+        headers.append("runtime_TORCH_us")
+    for method in methods:
+        if method == "TORCH":
+            continue
+        headers.extend(
+            [
+                f"config_{method}",
+                f"runtime_{method}_us",
+            ]
+        )
+    for ratio_key in ["speed_BUCKET_over_TORCH", "speed_FULL_TUNE_over_TORCH", "speed_BUCKET_over_FULL_TUNE"]:
+        if ratio_key in fieldnames:
+            headers.append(ratio_key)
+
     for row in rows:
         shape = str(row.get("shape", "")).strip()
         if not shape:
@@ -85,36 +130,42 @@ def _print_case_compare(compare_csv: Path) -> None:
             n = str(row.get("N", "")).strip()
             k = str(row.get("K", "")).strip()
             shape = f"{m}x{n}x{k}" if m and n and k else ""
-        display_rows.append(
-            {
-                "shape_id": row.get("shape_id", ""),
-                "shape": shape,
-                "config_torch": row.get("config_desc_TORCH", "") or row.get("config_id_TORCH", ""),
-                "config_bucket": row.get("config_desc_BUCKET", "") or row.get("config_id_BUCKET", ""),
-                "runtime_torch_us": row.get("runtime_cost_us_TORCH", ""),
-                "runtime_bucket_us": row.get("runtime_cost_us_BUCKET", ""),
-                "ratio": row.get("ratio_BUCKET_over_TORCH", ""),
-                "delta_us": row.get("delta_us_BUCKET_minus_TORCH", ""),
-            }
-        )
+        out: Dict[str, object] = {"shape_id": row.get("shape_id", ""), "shape": shape}
+        if "TORCH" in methods:
+            out["runtime_TORCH_us"] = row.get("runtime_cost_us_TORCH", "")
+        for method in methods:
+            if method == "TORCH":
+                continue
+            out[f"config_{method}"] = row.get(f"config_desc_{method}", "") or row.get(f"config_id_{method}", "")
+            out[f"runtime_{method}_us"] = row.get(f"runtime_cost_us_{method}", "")
+        out["speed_BUCKET_over_TORCH"] = row.get("speed_BUCKET_over_TORCH", "")
+        out["speed_FULL_TUNE_over_TORCH"] = row.get("speed_FULL_TUNE_over_TORCH", "")
+        out["speed_BUCKET_over_FULL_TUNE"] = row.get("speed_BUCKET_over_FULL_TUNE", "")
+        display_rows.append(out)
     display_rows.sort(key=lambda r: _shape_sort_key(str(r.get("shape_id", ""))))
-    _print_section(
-        "CASE COMPARE (EVAL)",
-        display_rows,
-        [
-            "shape_id",
-            "shape",
-            "config_torch",
-            "config_bucket",
-            "runtime_torch_us",
-            "runtime_bucket_us",
-            "ratio",
-            "delta_us",
-        ],
-    )
+
+    summary_row: Dict[str, object] = {
+        "shape_id": f"SUMMARY(p={speed_power:g})",
+        "shape": f"power_mean_speed, n={len(display_rows)}",
+    }
+    for ratio_key in ["speed_BUCKET_over_TORCH", "speed_FULL_TUNE_over_TORCH", "speed_BUCKET_over_FULL_TUNE"]:
+        if ratio_key not in headers:
+            continue
+        values = [_to_float_text(str(r.get(ratio_key, ""))) for r in display_rows]
+        valid = [v for v in values if v > 0.0]
+        summary_row[ratio_key] = f"{_power_mean(valid, speed_power):.6f}" if valid else ""
+    display_rows.append(summary_row)
+
+    _print_section("CASE COMPARE (EVAL)", display_rows, headers)
 
 
-def summarize(input_csv: Path, out_dir: Path, prefix: str, compare_csv: Path | None = None) -> Tuple[Path, Path, Path]:
+def summarize(
+    input_csv: Path,
+    out_dir: Path,
+    prefix: str,
+    compare_csv: Path | None = None,
+    speed_power: float = 2.0,
+) -> Tuple[Path, Path, Path]:
     with input_csv.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
@@ -136,8 +187,7 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str, compare_csv: Path | N
         elif split == "tune":
             tune_by_method[method].append(row)
 
-    method_order = {"TORCH": 0, "BUCKET": 1}
-    methods = sorted(set(eval_by_method.keys()) | set(tune_by_method.keys()), key=lambda x: (method_order.get(x, 99), x))
+    methods = sorted(set(eval_by_method.keys()) | set(tune_by_method.keys()), key=_method_sort_key)
 
     overall_rows: List[Dict[str, object]] = []
     torch_p50 = None
@@ -182,6 +232,8 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str, compare_csv: Path | N
     tune_rows: List[Dict[str, object]] = []
     for method in methods:
         this_rows = tune_by_method.get(method, [])
+        if method == "FULL_TUNE" and not this_rows:
+            this_rows = eval_by_method.get(method, [])
         tune_times = [_to_float(r, "tune_time_ms") for r in this_rows]
         compile_times = [_to_float(r, "compile_time_ms") for r in this_rows]
         tune_rows.append(
@@ -243,6 +295,8 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str, compare_csv: Path | N
         ["method", "bucket_key", "samples", "median_runtime_us"],
     )
     if compare_csv is not None:
-        _print_case_compare(compare_csv)
+        if not math.isfinite(float(speed_power)) or float(speed_power) <= 0.0:
+            raise ValueError(f"speed_power 必须 > 0 且为有限数，当前: {speed_power}")
+        _print_case_compare(compare_csv, float(speed_power))
 
     return overall_path, tune_path, bucket_path

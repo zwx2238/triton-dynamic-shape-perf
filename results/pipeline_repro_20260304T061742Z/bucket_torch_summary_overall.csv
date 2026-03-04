@@ -1,0 +1,4 @@
+method,samples,median_runtime_us,mean_runtime_us,speedup_vs_torch
+TORCH,2,15.251000,15.251000,1.000000
+BUCKET,2,25.330000,25.330000,0.602092
+FULL_TUNE,2,20.350000,20.350000,0.749435

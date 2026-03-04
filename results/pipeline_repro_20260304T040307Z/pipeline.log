@@ -1,0 +1,19 @@
+[2026-03-04T04:03:07Z] run_dir=results/pipeline_repro_20260304T040307Z
+[2026-03-04T04:03:07Z] op=matmul
+[2026-03-04T04:03:07Z] params: dtype=fp16 tune_size=16 eval_size=16 prototype_count=4 warmup=5 repeat=10 bucket_splits=[128, 2048, 3072]
+[2026-03-04T04:03:07Z] START stage=setup_benchmark
+[2026-03-04T04:03:15Z] FAILED stage=setup_benchmark
+Traceback (most recent call last):
+  File "/root/autodl-tmp/triton-dynamic-shape-perf/run_bucket_tune_pipeline.py", line 116, in run_stage
+    out = fn()
+  File "/root/autodl-tmp/triton-dynamic-shape-perf/run_bucket_tune_pipeline.py", line 177, in setup_benchmark_stage
+    benchmark_config = build_benchmark_config(options)
+  File "/root/autodl-tmp/triton-dynamic-shape-perf/bench/bucket_tune/runtime.py", line 20, in build_benchmark_config
+    tune_set = op.make_tune_set(rng_tune, options.tune_size, options.bucket_splits)
+  File "/root/autodl-tmp/triton-dynamic-shape-perf/bench/ops/matmul/__init__.py", line 41, in make_tune_set
+    return build_tune_set(rng, tune_size, m_split, n_split, k_split)
+  File "/root/autodl-tmp/triton-dynamic-shape-perf/bench/ops/matmul/shapes.py", line 131, in build_tune_set
+    bucket_candidates = _build_bucket_candidates(m_split, n_split, k_split)
+  File "/root/autodl-tmp/triton-dynamic-shape-perf/bench/ops/matmul/shapes.py", line 65, in _build_bucket_candidates
+    raise RuntimeError(f"BUG: 新分桶存在不可达 key: {missing}")
+RuntimeError: BUG: 新分桶存在不可达 key: [0, 1, 2, 3]

@@ -1,0 +1,5 @@
+shape,picked_config_id,BLOCK_M,BLOCK_N,BLOCK_K,runtime_cost_us,invalid_config,score,notes
+8x2048x4096,c16,96,128,128,17.34,0,17.34,"path_reordered,ASCEND_HOME_PATH_set,ASCEND_TOOLKIT_HOME_set;launch=fixed_cores(16),swizzle2d_g=4,dir=1;timing=npu_profiler_batch_offline_kernel_step"
+64x6144x1024,c18,64,128,128,13.08,0,13.08,"path_reordered,ASCEND_HOME_PATH_set,ASCEND_TOOLKIT_HOME_set;launch=fixed_cores(24),swizzle2d_g=4,dir=1;timing=npu_profiler_batch_offline_kernel_step"
+4x6144x1024,c29,16,256,128,8.18,0,8.18,"path_reordered,ASCEND_HOME_PATH_set,ASCEND_TOOLKIT_HOME_set;launch=fixed_cores(24),swizzle2d_g=4,dir=1;timing=npu_profiler_batch_offline_kernel_step"
+64x8192x8192,c18,64,128,128,104.164,0,104.164,"path_reordered,ASCEND_HOME_PATH_set,ASCEND_TOOLKIT_HOME_set;launch=fixed_cores(24),swizzle2d_g=4,dir=1;timing=npu_profiler_batch_offline_kernel_step"

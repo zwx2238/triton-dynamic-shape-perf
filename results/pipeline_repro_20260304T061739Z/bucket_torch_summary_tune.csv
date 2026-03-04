@@ -1,0 +1,4 @@
+method,tune_rows,tuned_nonzero,total_tune_ms,total_compile_ms
+TORCH,0,0,0.000000,0.000000
+BUCKET,16,1,18606.486000,0.000000
+FULL_TUNE,16,1,122693.722000,3.620408

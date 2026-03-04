@@ -1,0 +1,29 @@
+[2026-03-04T04:22:44Z] run_dir=results/pipeline_repro_20260304T042244Z
+[2026-03-04T04:22:44Z] op=matmul
+[2026-03-04T04:22:44Z] params: dtype=fp16 tune_size=8 eval_size=4 prototype_count=1 warmup=1 repeat=1 bucket_splits=[128, 2048, 3072]
+[2026-03-04T04:22:44Z] START stage=setup_benchmark
+[2026-03-04T04:22:52Z] bucket_key_info splits=[128, 2048, 3072] reachable=[4, 5, 6, 7] unreachable=[0, 1, 2, 3] eval=[6, 7]
+[2026-03-04T04:22:52Z] END stage=setup_benchmark elapsed_sec=8
+[2026-03-04T04:22:52Z] START stage=prototype
+[2026-03-04T04:23:09Z] prototype_candidate_ids=c29
+[2026-03-04T04:23:09Z] END stage=prototype elapsed_sec=16
+[2026-03-04T04:23:09Z] START stage=benchmark_bucket
+[2026-03-04T04:23:39Z] END stage=benchmark_bucket elapsed_sec=30
+[2026-03-04T04:23:39Z] START stage=benchmark_full_tune
+[2026-03-04T04:24:21Z] END stage=benchmark_full_tune elapsed_sec=41
+[2026-03-04T04:24:21Z] START stage=benchmark_torch
+[2026-03-04T04:24:37Z] END stage=benchmark_torch elapsed_sec=15
+[2026-03-04T04:24:37Z] START stage=case_compare
+[2026-03-04T04:24:37Z] END stage=case_compare elapsed_sec=0
+[2026-03-04T04:24:37Z] START stage=summary
+[2026-03-04T04:24:37Z] END stage=summary elapsed_sec=0
+[2026-03-04T04:24:37Z] stage_elapsed_sec=setup_benchmark:8,prototype:16,benchmark_bucket:30,benchmark_full_tune:41,benchmark_torch:15,case_compare:0,summary:0
+[2026-03-04T04:24:37Z] TOTAL elapsed_sec=112
+[2026-03-04T04:24:37Z] DONE
+[2026-03-04T04:24:37Z] outputs:
+[2026-03-04T04:24:37Z]   - results/pipeline_repro_20260304T042244Z/prototype_best.csv
+[2026-03-04T04:24:37Z]   - results/pipeline_repro_20260304T042244Z/bucket_torch.csv
+[2026-03-04T04:24:37Z]   - results/pipeline_repro_20260304T042244Z/bucket_torch_case_compare_eval.csv
+[2026-03-04T04:24:37Z]   - results/pipeline_repro_20260304T042244Z/bucket_torch_summary_overall.csv
+[2026-03-04T04:24:37Z]   - results/pipeline_repro_20260304T042244Z/bucket_torch_summary_tune.csv
+[2026-03-04T04:24:37Z]   - results/pipeline_repro_20260304T042244Z/bucket_torch_summary_by_bucket.csv

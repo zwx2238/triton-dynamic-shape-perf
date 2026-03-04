@@ -50,20 +50,14 @@ def _format_shape(row: Dict[str, str]) -> str:
 
 
 def _format_config_desc(method: str, row: Dict[str, str]) -> str:
-    if method == "BUCKET":
+    if method != "TORCH":
         bm = str(row.get("BLOCK_M", "")).strip()
         bn = str(row.get("BLOCK_N", "")).strip()
         bk = str(row.get("BLOCK_K", "")).strip()
         if bm and bn and bk and bm != "-1" and bn != "-1" and bk != "-1":
             return f"BM={bm},BN={bn},BK={bk}"
     if method == "TORCH":
-        dtype = str(row.get("dtype", "")).strip() or "unknown"
-        device = "npu"
-        config_id = str(row.get("config_id", "")).strip()
-        prefix = "torch_mm_"
-        if config_id.startswith(prefix) and len(config_id) > len(prefix):
-            device = config_id[len(prefix):]
-        return f"torch.mm(dtype={dtype},device={device})"
+        return ""
     return str(row.get("config_id", "")).strip()
 
 
@@ -95,7 +89,17 @@ def compare_case_runtime(
     if not filtered:
         raise RuntimeError(f"在 split={split} 下没有数据")
 
-    methods = ["TORCH", "BUCKET"]
+    method_order = {"TORCH": 0, "BUCKET": 1, "FULL_TUNE": 2}
+    methods = sorted(
+        {
+            str(row.get("method", "")).strip()
+            for row in filtered
+            if str(row.get("method", "")).strip()
+        },
+        key=lambda x: (method_order.get(x, 99), x),
+    )
+    if "TORCH" not in methods:
+        raise RuntimeError("compare 需要 TORCH 基线数据（split=eval）")
 
     timing_by_method_split: Dict[Tuple[str, str], set[str]] = {}
     for row in rows:
@@ -155,24 +159,31 @@ def compare_case_runtime(
     cfg_desc_cols = [f"config_desc_{m}" for m in methods]
     invalid_cols = [f"invalid_config_{m}" for m in methods]
     timing_cols = [f"timing_source_{m}" for m in methods]
-    ratio_cols: List[str] = ["ratio_BUCKET_over_TORCH"]
-    delta_cols: List[str] = ["delta_us_BUCKET_minus_TORCH"]
+    ratio_cols: List[str] = []
+    if "BUCKET" in methods and "TORCH" in methods:
+        ratio_cols.append("speed_BUCKET_over_TORCH")
+    if "FULL_TUNE" in methods and "TORCH" in methods:
+        ratio_cols.append("speed_FULL_TUNE_over_TORCH")
+    if "BUCKET" in methods and "FULL_TUNE" in methods:
+        ratio_cols.append("speed_BUCKET_over_FULL_TUNE")
 
     out_rows = list(table.values())
     for row in out_rows:
-        base = _to_float(row.get("runtime_cost_us_TORCH", ""))
-        for m in methods:
-            if m == "TORCH":
-                continue
-            cur = _to_float(row.get(f"runtime_cost_us_{m}", ""))
-            ratio_col = f"ratio_{m}_over_TORCH"
-            delta_col = f"delta_us_{m}_minus_TORCH"
-            if base > 0 and cur > 0:
-                row[ratio_col] = f"{cur / base:.6f}"
-                row[delta_col] = f"{cur - base:.6f}"
-            else:
-                row[ratio_col] = ""
-                row[delta_col] = ""
+        runtime_torch = _to_float(row.get("runtime_cost_us_TORCH", ""))
+        runtime_bucket = _to_float(row.get("runtime_cost_us_BUCKET", ""))
+        runtime_full = _to_float(row.get("runtime_cost_us_FULL_TUNE", ""))
+        if "speed_BUCKET_over_TORCH" in ratio_cols:
+            row["speed_BUCKET_over_TORCH"] = (
+                f"{runtime_torch / runtime_bucket:.6f}" if runtime_torch > 0 and runtime_bucket > 0 else ""
+            )
+        if "speed_FULL_TUNE_over_TORCH" in ratio_cols:
+            row["speed_FULL_TUNE_over_TORCH"] = (
+                f"{runtime_torch / runtime_full:.6f}" if runtime_torch > 0 and runtime_full > 0 else ""
+            )
+        if "speed_BUCKET_over_FULL_TUNE" in ratio_cols:
+            row["speed_BUCKET_over_FULL_TUNE"] = (
+                f"{runtime_full / runtime_bucket:.6f}" if runtime_full > 0 and runtime_bucket > 0 else ""
+            )
 
     out_rows.sort(key=lambda r: _shape_sort_key(r.get("shape_id", "")))
 
@@ -184,7 +195,6 @@ def compare_case_runtime(
         *invalid_cols,
         *timing_cols,
         *ratio_cols,
-        *delta_cols,
     ]
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)

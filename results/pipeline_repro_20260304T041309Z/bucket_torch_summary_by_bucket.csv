@@ -1,0 +1,5 @@
+method,bucket_key,samples,median_runtime_us
+BUCKET,6,2,31.000000
+BUCKET,7,2,8.390000
+TORCH,6,2,18.690000
+TORCH,7,2,6.450000

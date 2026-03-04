@@ -1,0 +1,2 @@
+shape,picked_config_id,BLOCK_M,BLOCK_N,BLOCK_K,runtime_cost_us,invalid_config,score,notes
+8x4096x3072,c29,16,256,128,17.982,0,17.982,"path_reordered,ASCEND_HOME_PATH_set,ASCEND_TOOLKIT_HOME_set;launch=fixed_cores(16),swizzle2d_g=4,dir=1;timing=npu_profiler_batch_offline_kernel_step"
