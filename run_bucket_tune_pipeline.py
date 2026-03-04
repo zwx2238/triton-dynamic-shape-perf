@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures as cf
 import csv
 import datetime as dt
 import logging
@@ -14,10 +15,11 @@ from bench.bucket_tune.runtime import build_benchmark_config, build_benchmark_st
 from bench.bucket_tune.types import BenchmarkConfig, BenchmarkOptions, BenchmarkState
 from bench.ops import list_operators
 from bench.reporting.compare_case_runtime import compare_case_runtime
+from bench.reporting.csv_logger import append_records
 from bench.reporting.summarize_results import summarize
 from bench.stages.bucket_stage import run_bucket
 from bench.stages.prototype_stage import run_prototype
-from bench.stages.torch_stage import run_torch
+from bench.stages.torch_stage import collect_torch_rows, run_torch
 
 
 def utc_ts() -> str:
@@ -82,6 +84,7 @@ class Pipeline:
         self.summary_prefix = "bucket_torch"
 
         self.logger = build_logger(self.log_file)
+        self.stage_elapsed_sec: list[tuple[str, int]] = []
 
         with self.stage_times_csv.open("w", newline="", encoding="utf-8") as f:
             f.write("stage,start_utc,end_utc,elapsed_sec,detail\n")
@@ -120,12 +123,15 @@ class Pipeline:
         elapsed = int(time.time() - t0)
         end_utc = utc_iso()
         self.logger.info("END stage=%s elapsed_sec=%s", stage, elapsed)
+        self.stage_elapsed_sec.append((stage, elapsed))
         self.append_stage_time(stage, start_utc, end_utc, elapsed, detail)
 
     def run(self) -> None:
         args = self.args
         if int(args.prototype_count) <= 0:
             raise ValueError(f"要求 --prototype-count > 0（当前: {args.prototype_count}）")
+        pipeline_start_utc = utc_iso()
+        pipeline_t0 = time.time()
 
         self.logger.info("run_dir=%s", self.run_dir)
         self.logger.info("op=%s", args.op)
@@ -156,6 +162,9 @@ class Pipeline:
         )
         benchmark_config: Optional[BenchmarkConfig] = None
         benchmark_state: Optional[BenchmarkState] = None
+        torch_pool = cf.ThreadPoolExecutor(max_workers=1)
+        torch_future: Optional[cf.Future[tuple[str, list[dict[str, object]]]]] = None
+        torch_launch_t0 = 0.0
 
         def require_context() -> tuple[BenchmarkConfig, BenchmarkState]:
             if benchmark_config is None or benchmark_state is None:
@@ -181,7 +190,14 @@ class Pipeline:
             return run_bucket(config, state)
 
         def torch_stage() -> str:
+            nonlocal torch_future
+            nonlocal torch_launch_t0
             config, state = require_context()
+            if torch_future is not None:
+                detail, rows = torch_future.result()
+                append_records(config.options.results_csv, rows)
+                async_wall_sec = int(time.time() - torch_launch_t0)
+                return f"{detail},async_capture=1,async_wall_sec={async_wall_sec}"
             return run_torch(config, state)
 
         def case_compare_stage() -> str:
@@ -197,12 +213,28 @@ class Pipeline:
             overall_path, tune_path, bucket_path = summarize(self.main_results_csv, self.run_dir, self.summary_prefix)
             return f"overall={overall_path},tune={tune_path},bucket={bucket_path}"
 
-        self.run_stage("setup_benchmark", setup_benchmark_stage)
-        self.run_stage("prototype", prototype_stage)
-        self.run_stage("benchmark_bucket", bucket_stage)
-        self.run_stage("benchmark_torch", torch_stage)
-        self.run_stage("case_compare", case_compare_stage)
-        self.run_stage("summary", summary_stage)
+        try:
+            self.run_stage("setup_benchmark", setup_benchmark_stage)
+            config, state = require_context()
+            torch_launch_t0 = time.time()
+            torch_future = torch_pool.submit(collect_torch_rows, config, state)
+            self.logger.info("START async_stage=benchmark_torch_capture")
+            self.run_stage("prototype", prototype_stage)
+            self.run_stage("benchmark_bucket", bucket_stage)
+            self.run_stage("benchmark_torch", torch_stage)
+            self.run_stage("case_compare", case_compare_stage)
+            self.run_stage("summary", summary_stage)
+        finally:
+            torch_pool.shutdown(wait=False, cancel_futures=False)
+
+        total_elapsed_sec = int(time.time() - pipeline_t0)
+        pipeline_end_utc = utc_iso()
+        self.append_stage_time("all_total", pipeline_start_utc, pipeline_end_utc, total_elapsed_sec, "pipeline_total")
+        self.logger.info(
+            "stage_elapsed_sec=%s",
+            ",".join(f"{name}:{sec}" for name, sec in self.stage_elapsed_sec),
+        )
+        self.logger.info("TOTAL elapsed_sec=%s", total_elapsed_sec)
 
         self.update_status("done", "all_done")
         self.logger.info("DONE")

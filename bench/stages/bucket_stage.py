@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict, List
+import time
+from typing import Dict, List, Tuple
 
-from bench.bucket_tune.runtime import eval_triton_tune_batch
 from bench.bucket_tune.types import BenchmarkConfig, BenchmarkState
-from bench.policies.bucket_policy import BucketTunePolicy
+from bench.policies.common import SelectionResult, autotune_best
 from bench.reporting.csv_logger import append_records
 
 
@@ -13,28 +13,99 @@ def run_bucket(config: BenchmarkConfig, state: BenchmarkState) -> str:
     op = config.op
     splits = options.bucket_splits
     rows: List[Dict[str, object]] = []
-    policy = BucketTunePolicy(
-        candidates=state.candidates,
-        key_fn=lambda shape: op.eval_key(shape, splits),
-        key_to_str=lambda key: op.eval_key_str(key),
-    )
+    candidates = list(state.candidates)
 
-    tuned_keys: set = set()
+    first_shape_by_key: Dict[object, tuple] = {}
+    first_index_by_key: Dict[object, int] = {}
     for idx, shape in enumerate(config.tune_set):
-        sel = policy.select(shape, lambda s, cfgs: eval_triton_tune_batch(config, s, cfgs))
+        key = op.eval_key(shape, splits)
+        if key not in first_shape_by_key:
+            first_shape_by_key[key] = shape
+            first_index_by_key[key] = idx
+
+    tuned_keys = set(first_shape_by_key.keys())
+    if not tuned_keys:
+        raise RuntimeError("BUG: tune_set 为空，无法执行 bucket tune")
+
+    tune_entries: List[Tuple[tuple, object]] = []
+    key_order = list(first_shape_by_key.keys())
+    for key in key_order:
+        shape = first_shape_by_key[key]
+        for cfg in candidates:
+            tune_entries.append((shape, cfg))
+
+    t0 = time.perf_counter()
+    tune_metrics = list(config.triton_evaluator.evaluate_batch(tune_entries))
+    batch_tune_time_ms = (time.perf_counter() - t0) * 1000.0
+    if len(tune_metrics) != len(tune_entries):
+        raise RuntimeError(
+            f"BUG: tune batch 返回长度不匹配，got={len(tune_metrics)} expected={len(tune_entries)}"
+        )
+
+    metrics_by_shape_cfg: Dict[Tuple[tuple, str], Dict[str, object]] = {}
+    for (shape, cfg), met in zip(tune_entries, tune_metrics):
+        cfg_id = str(getattr(cfg, "config_id", ""))
+        metrics_by_shape_cfg[(shape, cfg_id)] = dict(met)
+
+    def eval_from_batch(shape: tuple, cfgs: List[object]) -> List[Dict[str, object]]:
+        out: List[Dict[str, object]] = []
+        for cfg in cfgs:
+            cfg_id = str(getattr(cfg, "config_id", ""))
+            met = metrics_by_shape_cfg.get((shape, cfg_id))
+            if met is None:
+                raise RuntimeError(f"BUG: 缺少 batch tune metrics, shape={shape}, config_id={cfg_id}")
+            out.append(dict(met))
+        return out
+
+    selection_by_key: Dict[object, SelectionResult[object]] = {}
+    for key in key_order:
+        shape = first_shape_by_key[key]
+        best_cfg, best_metrics, notes = autotune_best(shape, candidates, eval_from_batch)
+        selection_by_key[key] = SelectionResult(
+            config=best_cfg,
+            cache_key=op.eval_key_str(key),
+            tune_time_ms=0.0,
+            premeasure=dict(best_metrics),
+            notes=notes,
+        )
+
+    # `tune_time_ms` now represents one global batch-tune walltime for this run.
+    # Record it once to avoid per-key amortization.
+    tune_time_owner_idx = min(first_index_by_key.values())
+
+    for idx, shape in enumerate(config.tune_set):
+        key = op.eval_key(shape, splits)
+        base_sel = selection_by_key.get(key)
+        if base_sel is None:
+            raise RuntimeError(f"BUG: tune 阶段缺少 key 对应选择结果: {key}")
+
+        sel = SelectionResult(
+            config=base_sel.config,
+            cache_key=base_sel.cache_key,
+            tune_time_ms=batch_tune_time_ms if idx == tune_time_owner_idx else 0.0,
+            premeasure=dict(base_sel.premeasure) if base_sel.premeasure is not None else None,
+            notes=base_sel.notes,
+        )
         if sel.premeasure is None:
             raise RuntimeError("BUG: tune 阶段缺少 batch premeasure")
         rows.append(op.make_bucket_record(config, "tune", idx, shape, sel, sel.premeasure))
-        tuned_keys.add(op.eval_key(shape, splits))
 
     missing = config.eval_keys - tuned_keys
     if missing:
         raise RuntimeError(f"BUG: 进入 eval 前存在未调过的 key: {sorted(missing)}")
 
     for idx, shape in enumerate(config.eval_set):
-        sel = policy.select(shape, lambda s, cfgs: eval_triton_tune_batch(config, s, cfgs))
-        if sel.tune_time_ms > 0:
-            raise RuntimeError("BUG: bucket policy 在 eval 阶段发生了调参")
+        key = op.eval_key(shape, splits)
+        base_sel = selection_by_key.get(key)
+        if base_sel is None:
+            raise RuntimeError(f"BUG: eval 阶段缺少 key 对应选择结果: {key}")
+        sel = SelectionResult(
+            config=base_sel.config,
+            cache_key=base_sel.cache_key,
+            tune_time_ms=0.0,
+            premeasure=None,
+            notes=base_sel.notes,
+        )
         rows.append(op.make_bucket_record(config, "eval", idx, shape, sel, {}))
 
     eval_rows = [row for row in rows if row["split"] == "eval"]

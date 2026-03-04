@@ -5,11 +5,30 @@ import csv
 import math
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Callable
 
 import torch
+
+_CAPTURE_LOCK = threading.Lock()
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "y"}
+
+
+def _finalize_profiler_note(note: str, prof_root: Path, keep_raw: bool) -> str:
+    if not keep_raw:
+        return note
+    # Keep this suffix semicolon-free so it stays inside `timing=...` token parsing.
+    return f"{note}|raw={prof_root}"
 
 
 def resolve_device(device: str) -> torch.device:
@@ -131,16 +150,41 @@ def _parse_npu_profiler_stage_step_durations_us(prof_root: Path) -> dict[int, fl
 
 
 def _run_npu_profiler_offline_analyse(profiler_module, prof_root: Path) -> tuple[bool, str]:
-    analyse_mod = getattr(profiler_module, "profiler", None)
-    analyse_fn = getattr(analyse_mod, "analyse", None) if analyse_mod is not None else None
-    if analyse_fn is None:
-        return False, "offline_analyse_api_missing"
+    _ = profiler_module
+    analyse_script = """
+import sys
+try:
+    from torch_npu import profiler  # type: ignore
+except Exception as exc:  # noqa: BLE001
+    print(f"import_failed:{type(exc).__name__}", file=sys.stderr)
+    raise SystemExit(4)
 
-    try:
-        analyse_fn(str(prof_root), export_type=profiler_module.ExportType.Text)
-        return True, "offline_analyse_ok"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"offline_analyse_failed:{type(exc).__name__}"
+prof_root = sys.argv[1]
+analyse_mod = getattr(profiler, "profiler", None)
+analyse_fn = getattr(analyse_mod, "analyse", None) if analyse_mod is not None else None
+if analyse_fn is None:
+    raise SystemExit(3)
+
+try:
+    analyse_fn(str(prof_root), export_type=profiler.ExportType.Text)
+except Exception as exc:  # noqa: BLE001
+    print(f"analyse_failed:{type(exc).__name__}:{exc}", file=sys.stderr)
+    raise SystemExit(2)
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", analyse_script, str(prof_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return True, "offline_analyse_subprocess_ok"
+    if proc.returncode == 3:
+        return False, "offline_analyse_api_missing"
+    stderr = (proc.stderr or "").strip().replace("\n", "|")
+    if not stderr:
+        stderr = f"code={proc.returncode}"
+    return False, f"offline_analyse_subprocess_failed:{stderr}"
 
 
 def _align_step_durations_to_expected(step_durations: dict[int, float], expected_steps: int) -> list[float]:
@@ -198,6 +242,7 @@ def _profile_npu_step_launches_us_single(
 
     active_steps = len(step_launches)
     prof_root = Path(tempfile.mkdtemp(prefix="npu_prof_batch_"))
+    keep_raw = _env_flag("NPU_PROFILER_KEEP_RAW", default=False)
     activities = [profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU]
     sched = profiler.schedule(wait=0, warmup=1, active=active_steps, repeat=1)
     trace_cb = profiler.tensorboard_trace_handler(
@@ -208,53 +253,60 @@ def _profile_npu_step_launches_us_single(
     exp_cfg = profiler._ExperimentalConfig(export_type=profiler.ExportType.Text)
 
     try:
-        with profiler.profile(
-            activities=activities,
-            schedule=sched,
-            on_trace_ready=trace_cb,
-            experimental_config=exp_cfg,
-        ) as prof:
-            # schedule warmup step (not counted in active steps)
-            step_launches[0]()
-            synchronize(device)
-            prof.step()
-            for launch in step_launches:
-                launch()
+        # Capture on NPU is serialized; offline analysis can run concurrently.
+        with _CAPTURE_LOCK:
+            with profiler.profile(
+                activities=activities,
+                schedule=sched,
+                on_trace_ready=trace_cb,
+                experimental_config=exp_cfg,
+            ) as prof:
+                # schedule warmup step (not counted in active steps)
+                step_launches[0]()
                 synchronize(device)
                 prof.step()
+                for launch in step_launches:
+                    launch()
+                    synchronize(device)
+                    prof.step()
 
         analysed, analyse_note = _run_npu_profiler_offline_analyse(profiler, prof_root)
         if not analysed:
-            return [], analyse_note
+            return [], _finalize_profiler_note(analyse_note, prof_root, keep_raw)
 
         kernel_step = _parse_npu_profiler_kernel_step_durations_us(prof_root)
         if kernel_step:
             latencies = _align_step_durations_to_expected(kernel_step, active_steps)
             if latencies and sum(1 for x in latencies if x > 0) >= max(1, int(active_steps * 0.9)):
-                return latencies, "npu_profiler_batch_offline_kernel_step"
+                return latencies, _finalize_profiler_note("npu_profiler_batch_offline_kernel_step", prof_root, keep_raw)
 
         stage_step = _parse_npu_profiler_stage_step_durations_us(prof_root)
         if stage_step:
             latencies = _align_step_durations_to_expected(stage_step, active_steps)
             if latencies and sum(1 for x in latencies if x > 0) >= max(1, int(active_steps * 0.8)):
-                return latencies, "npu_profiler_batch_offline_step_trace_stage"
+                return latencies, _finalize_profiler_note("npu_profiler_batch_offline_step_trace_stage", prof_root, keep_raw)
 
         stage_flat = _parse_npu_profiler_stage_latencies_us(prof_root)
         if len(stage_flat) >= active_steps:
-            return stage_flat[:active_steps], "npu_profiler_batch_offline_step_trace_flat"
+            return stage_flat[:active_steps], _finalize_profiler_note(
+                "npu_profiler_batch_offline_step_trace_flat", prof_root, keep_raw
+            )
 
         flat = _parse_npu_profiler_kernel_latencies_us(prof_root)
         if len(flat) >= active_steps:
-            return flat[:active_steps], "npu_profiler_batch_offline_kernel_flat"
+            return flat[:active_steps], _finalize_profiler_note("npu_profiler_batch_offline_kernel_flat", prof_root, keep_raw)
         if flat:
-            return flat, "npu_profiler_batch_offline_short_kernel_flat"
+            return flat, _finalize_profiler_note("npu_profiler_batch_offline_short_kernel_flat", prof_root, keep_raw)
         if stage_flat:
-            return stage_flat, "npu_profiler_batch_offline_short_step_trace_flat"
-        return [], f"{analyse_note};npu_profiler_batch_no_csv"
+            return stage_flat, _finalize_profiler_note(
+                "npu_profiler_batch_offline_short_step_trace_flat", prof_root, keep_raw
+            )
+        return [], _finalize_profiler_note(f"{analyse_note};npu_profiler_batch_no_csv", prof_root, keep_raw)
     except Exception as exc:  # noqa: BLE001
-        return [], f"npu_profiler_batch_failed:{type(exc).__name__}"
+        return [], _finalize_profiler_note(f"npu_profiler_batch_failed:{type(exc).__name__}", prof_root, keep_raw)
     finally:
-        shutil.rmtree(prof_root, ignore_errors=True)
+        if not keep_raw:
+            shutil.rmtree(prof_root, ignore_errors=True)
 
 
 def profile_npu_step_launches_us(
@@ -265,32 +317,7 @@ def profile_npu_step_launches_us(
         raise ValueError("profile_npu_step_launches_us 仅支持 npu 设备")
     if not step_launches:
         return [], "npu_profiler_empty_steps"
-
-    max_steps_raw = os.environ.get("NPU_PROFILER_BATCH_MAX_STEPS", "2048").strip()
-    try:
-        max_steps = int(max_steps_raw)
-    except ValueError:
-        max_steps = 2048
-    if max_steps <= 0:
-        max_steps = len(step_launches)
-
-    total_steps = len(step_launches)
-    if total_steps <= max_steps:
-        return _profile_npu_step_launches_us_single(device, step_launches)
-
-    merged_latencies: list[float] = []
-    chunk_notes: list[str] = []
-    for chunk_start in range(0, total_steps, max_steps):
-        chunk_steps = step_launches[chunk_start : chunk_start + max_steps]
-        latencies, note = _profile_npu_step_launches_us_single(device, chunk_steps)
-        if len(latencies) < len(chunk_steps):
-            return [], f"chunked_batch_failed@{chunk_start}:{note}"
-        merged_latencies.extend(latencies[: len(chunk_steps)])
-        chunk_notes.append(note)
-
-    uniq_notes = sorted(set(chunk_notes))
-    note_suffix = "|".join(uniq_notes)
-    return merged_latencies, f"npu_profiler_batch_chunked(max_steps={max_steps});{note_suffix}"
+    return _profile_npu_step_launches_us_single(device, step_launches)
 
 
 def _measure_latencies_us_with_torch_npu_profiler(
@@ -304,6 +331,7 @@ def _measure_latencies_us_with_torch_npu_profiler(
         return [], f"profiler_import_failed:{type(exc).__name__}"
 
     prof_root = Path(tempfile.mkdtemp(prefix="npu_prof_eval_"))
+    keep_raw = _env_flag("NPU_PROFILER_KEEP_RAW", default=False)
     activities = [profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU]
     # Use one warmup step inside schedule to avoid profile() warmup warning.
     sched = profiler.schedule(wait=0, warmup=1, active=repeat, repeat=1)
@@ -315,32 +343,35 @@ def _measure_latencies_us_with_torch_npu_profiler(
     exp_cfg = profiler._ExperimentalConfig(export_type=profiler.ExportType.Text)
 
     try:
-        with profiler.profile(
-            activities=activities,
-            schedule=sched,
-            on_trace_ready=trace_cb,
-            experimental_config=exp_cfg,
-        ) as prof:
-            for _ in range(repeat + 1):
-                launch()
-                synchronize(device)
-                prof.step()
+        # Capture on NPU is serialized; offline analysis can run concurrently.
+        with _CAPTURE_LOCK:
+            with profiler.profile(
+                activities=activities,
+                schedule=sched,
+                on_trace_ready=trace_cb,
+                experimental_config=exp_cfg,
+            ) as prof:
+                for _ in range(repeat + 1):
+                    launch()
+                    synchronize(device)
+                    prof.step()
 
         analysed, analyse_note = _run_npu_profiler_offline_analyse(profiler, prof_root)
         if not analysed:
-            return [], analyse_note
+            return [], _finalize_profiler_note(analyse_note, prof_root, keep_raw)
         latencies = _parse_npu_profiler_kernel_latencies_us(prof_root)
         if latencies:
-            return latencies, "npu_profiler_offline_kernel_details"
+            return latencies, _finalize_profiler_note("npu_profiler_offline_kernel_details", prof_root, keep_raw)
 
         stage_latencies = _parse_npu_profiler_stage_latencies_us(prof_root)
         if stage_latencies:
-            return stage_latencies, "npu_profiler_offline_step_trace_stage"
-        return [], f"{analyse_note};npu_profiler_no_csv"
+            return stage_latencies, _finalize_profiler_note("npu_profiler_offline_step_trace_stage", prof_root, keep_raw)
+        return [], _finalize_profiler_note(f"{analyse_note};npu_profiler_no_csv", prof_root, keep_raw)
     except Exception as exc:  # noqa: BLE001
-        return [], f"npu_profiler_failed:{type(exc).__name__}"
+        return [], _finalize_profiler_note(f"npu_profiler_failed:{type(exc).__name__}", prof_root, keep_raw)
     finally:
-        shutil.rmtree(prof_root, ignore_errors=True)
+        if not keep_raw:
+            shutil.rmtree(prof_root, ignore_errors=True)
 
 
 def measure_latencies_us(

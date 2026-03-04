@@ -86,13 +86,42 @@ def derive_candidate_pool_from_typical_shapes(
     typical_shapes: Sequence[Shape],
     candidates: Sequence[MatmulConfig],
     eval_batch: Callable[[Shape, Sequence[MatmulConfig]], Sequence[Dict[str, object]]],
+    eval_batch_all: Optional[Callable[[Sequence[Shape], Sequence[MatmulConfig]], Sequence[Dict[str, object]]]] = None,
 ) -> tuple[List[MatmulConfig], List[Dict[str, object]]]:
+    eval_for_shape = eval_batch
+    if eval_batch_all is not None and typical_shapes and candidates:
+        flat_metrics = list(eval_batch_all(typical_shapes, candidates))
+        expected = len(typical_shapes) * len(candidates)
+        if len(flat_metrics) != expected:
+            raise RuntimeError(
+                f"prototype batch 返回长度不匹配，got={len(flat_metrics)} expected={expected}"
+            )
+
+        metrics_by_shape_cfg: Dict[Tuple[Shape, str], Dict[str, object]] = {}
+        metric_idx = 0
+        for shape in typical_shapes:
+            for cfg in candidates:
+                metrics_by_shape_cfg[(shape, cfg.config_id)] = dict(flat_metrics[metric_idx])
+                metric_idx += 1
+
+        def _eval_from_cache(shape: Shape, cfgs: Sequence[MatmulConfig]) -> Sequence[Dict[str, object]]:
+            out: List[Dict[str, object]] = []
+            for cfg in cfgs:
+                key = (shape, cfg.config_id)
+                met = metrics_by_shape_cfg.get(key)
+                if met is None:
+                    raise RuntimeError(f"prototype batch 缺少 metrics: shape={shape}, config_id={cfg.config_id}")
+                out.append(dict(met))
+            return out
+
+        eval_for_shape = _eval_from_cache
+
     chosen: List[MatmulConfig] = []
     chosen_ids: set[str] = set()
     report_rows: List[Dict[str, object]] = []
 
     for shape in typical_shapes:
-        cfg, metrics, _ = autotune_best(shape, candidates, eval_batch)
+        cfg, metrics, _ = autotune_best(shape, candidates, eval_for_shape)
         runtime_us = float(metrics.get("runtime_cost_us", 0.0))
         invalid = int(metrics.get("invalid_config", 0))
         score = runtime_us if invalid == 0 and runtime_us > 0.0 else float("inf")

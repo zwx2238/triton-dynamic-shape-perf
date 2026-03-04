@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .configs import BASE_CONFIGS, CONFIG_MAP, MatmulConfig
 from .prototype import (
@@ -64,8 +64,16 @@ class MatmulOperator:
         typical_shapes: Sequence[Shape],
         candidates: Sequence[MatmulConfig],
         eval_batch: Callable[[Shape, Sequence[MatmulConfig]], Sequence[Dict[str, object]]],
+        eval_batch_all: Optional[
+            Callable[[Sequence[Shape], Sequence[MatmulConfig]], Sequence[Dict[str, object]]]
+        ] = None,
     ) -> tuple[List[MatmulConfig], List[Dict[str, object]]]:
-        return derive_candidate_pool_from_typical_shapes(typical_shapes, candidates, eval_batch)
+        return derive_candidate_pool_from_typical_shapes(
+            typical_shapes,
+            candidates,
+            eval_batch,
+            eval_batch_all=eval_batch_all,
+        )
 
     def write_prototype_report_csv(self, path: str, rows: Sequence[Dict[str, object]]) -> None:
         write_prototype_report_csv(path, rows)

@@ -1,5 +1,0 @@
-shape,picked_config_id,BLOCK_M,BLOCK_N,BLOCK_K,runtime_cost_us,invalid_config,score,notes
-8x2048x4096,c18,64,128,128,17.2,0,17.2,"path_reordered;launch=fixed_cores(16),swizzle2d_g=4,dir=1;timing=npu_profiler_batch_offline_kernel_step"
-64x6144x1024,c16,96,128,128,13.309999999999999,0,13.309999999999999,"path_reordered;launch=fixed_cores(24),swizzle2d_g=4,dir=1;timing=npu_profiler_batch_offline_kernel_step"
-4x6144x1024,c29,16,256,128,8.67,0,8.67,"path_reordered;launch=fixed_cores(24),swizzle2d_g=4,dir=1;timing=npu_profiler_batch_offline_kernel_step"
-64x8192x8192,c18,64,128,128,104.143,0,104.143,"path_reordered;launch=fixed_cores(24),swizzle2d_g=4,dir=1;timing=npu_profiler_batch_offline_kernel_step"
