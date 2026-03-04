@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -13,115 +12,46 @@ class MatmulConfig:
     BLOCK_K: int
 
 
-_BM_FIXED = 16
-_TILE_MULTIPLE = 16
-_BUF_CAP_BYTES = 512 * 1024
-_L1_DOUBLE_BUFFER = 2
-_NUM_BASE_CONFIGS = 8
-_DIVERSITY_TOP_MIN_LEVELS = 16
-
-
-@dataclass(frozen=True)
-class _TileCandidate:
-    bn: int
-    bk: int
-    min_tile: int
-    util_l0c: float
-    util_l1: float
-    util_geo: float
-
-
-def _is_feasible_tile(bn: int, bk: int) -> bool:
-    l0c_bytes = _BM_FIXED * bn * 4
-    l1_bytes = (_BM_FIXED * bk + bk * bn) * 4 * _L1_DOUBLE_BUFFER
-    return l0c_bytes <= _BUF_CAP_BYTES and l1_bytes <= _BUF_CAP_BYTES
-
-
-def _iter_tile_candidates() -> List[_TileCandidate]:
-    out: List[_TileCandidate] = []
-    for bn in range(_TILE_MULTIPLE, 8192 + _TILE_MULTIPLE, _TILE_MULTIPLE):
-        l0c_bytes = _BM_FIXED * bn * 4
-        if l0c_bytes > _BUF_CAP_BYTES:
-            break
-        for bk in range(_TILE_MULTIPLE, 8192 + _TILE_MULTIPLE, _TILE_MULTIPLE):
-            l1_bytes = (_BM_FIXED * bk + bk * bn) * 4 * _L1_DOUBLE_BUFFER
-            if l1_bytes > _BUF_CAP_BYTES:
-                break
-            # Mirror tiles are equivalent for this candidate seed pool.
-            if bn < bk:
-                continue
-            util_l0c = l0c_bytes / _BUF_CAP_BYTES
-            util_l1 = l1_bytes / _BUF_CAP_BYTES
-            out.append(
-                _TileCandidate(
-                    bn=bn,
-                    bk=bk,
-                    min_tile=min(bn, bk),
-                    util_l0c=util_l0c,
-                    util_l1=util_l1,
-                    util_geo=math.sqrt(util_l0c * util_l1),
-                )
-            )
-    return out
-
-
-def _pick_even_indices(total: int, count: int) -> List[int]:
-    if count <= 0 or total <= 0:
-        return []
-    if count >= total:
-        return list(range(total))
-    idxs = []
-    used = set()
-    for i in range(count):
-        idx = int(round(i * (total - 1) / (count - 1)))
-        while idx in used and idx + 1 < total:
-            idx += 1
-        while idx in used and idx - 1 >= 0:
-            idx -= 1
-        if idx in used:
-            continue
-        used.add(idx)
-        idxs.append(idx)
-    return sorted(idxs)
-
-
-def _build_base_configs() -> List[MatmulConfig]:
-    candidates = _iter_tile_candidates()
-    if not candidates:
-        raise RuntimeError("no feasible BM/BN/BK tiles found under 512KB constraints")
-
-    by_min: Dict[int, List[_TileCandidate]] = {}
-    for cand in candidates:
-        by_min.setdefault(cand.min_tile, []).append(cand)
-
-    min_levels = sorted(by_min.keys(), reverse=True)
-    focus_levels = min_levels[: min(len(min_levels), _DIVERSITY_TOP_MIN_LEVELS)]
-    level_indices = _pick_even_indices(len(focus_levels), _NUM_BASE_CONFIGS)
-
-    selected_tiles: List[_TileCandidate] = []
-    for idx in level_indices:
-        level = focus_levels[idx]
-        # Primary objective: larger min(BN, BK); tie-break by balanced buffer utilization.
-        best = max(
-            by_min[level],
-            key=lambda x: (x.util_geo, x.util_l1, x.util_l0c, x.bn, x.bk),
-        )
-        selected_tiles.append(best)
-
-    out: List[MatmulConfig] = []
-    for i, tile in enumerate(selected_tiles):
-        out.append(MatmulConfig(f"c{i:02d}", _BM_FIXED, tile.bn, tile.bk))
-    return out
-
-
-BASE_CONFIGS: List[MatmulConfig] = _build_base_configs()
+BASE_CONFIGS: List[MatmulConfig] = [
+    MatmulConfig("c00", 32, 32, 32),
+    MatmulConfig("c01", 64, 32, 32),
+    MatmulConfig("c02", 32, 64, 32),
+    MatmulConfig("c03", 64, 64, 32),
+    MatmulConfig("c04", 64, 64, 64),
+    MatmulConfig("c05", 128, 64, 32),
+    MatmulConfig("c06", 64, 128, 32),
+    MatmulConfig("c07", 128, 128, 32),
+    MatmulConfig("c08", 128, 128, 64),
+    MatmulConfig("c09", 128, 64, 64),
+    MatmulConfig("c10", 64, 128, 64),
+    MatmulConfig("c11", 32, 128, 32),
+    MatmulConfig("c12", 128, 128, 128),
+    MatmulConfig("c13", 128, 128, 96),
+    MatmulConfig("c14", 128, 128, 64),
+    MatmulConfig("c15", 128, 96, 128),
+    MatmulConfig("c16", 96, 128, 128),
+    MatmulConfig("c17", 128, 64, 128),
+    MatmulConfig("c18", 64, 128, 128),
+    MatmulConfig("c19", 256, 128, 64),
+    MatmulConfig("c20", 128, 256, 64),
+    MatmulConfig("c21", 256, 64, 64),
+    MatmulConfig("c22", 64, 256, 64),
+    MatmulConfig("c23", 128, 128, 128),
+    # 小 M 场景补充（例如 decode 阶段 M=1/2/4/8/16）
+    MatmulConfig("c24", 16, 128, 128),
+    MatmulConfig("c25", 16, 64, 128),
+    MatmulConfig("c26", 16, 128, 64),
+    MatmulConfig("c27", 16, 256, 64),
+    MatmulConfig("c28", 16, 64, 64),
+    MatmulConfig("c29", 16, 256, 128),
+]
 
 
 CONFIG_MAP: Dict[str, MatmulConfig] = {cfg.config_id: cfg for cfg in BASE_CONFIGS}
 
 
 def get_default_config() -> MatmulConfig:
-    return BASE_CONFIGS[min(3, len(BASE_CONFIGS) - 1)]
+    return CONFIG_MAP["c03"]
 
 
 def ids_to_configs(config_ids: List[str]) -> List[MatmulConfig]:

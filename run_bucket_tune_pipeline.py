@@ -6,10 +6,8 @@ import concurrent.futures as cf
 import csv
 import datetime as dt
 import logging
-import multiprocessing as mp
 import sys
 import time
-import math
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -20,9 +18,8 @@ from bench.reporting.compare_case_runtime import compare_case_runtime
 from bench.reporting.csv_logger import append_records
 from bench.reporting.summarize_results import summarize
 from bench.stages.bucket_stage import run_bucket
-from bench.stages.full_tune_stage import collect_full_tune_rows, run_full_tune
 from bench.stages.prototype_stage import run_prototype
-from bench.stages.torch_stage import run_torch
+from bench.stages.torch_stage import collect_torch_rows, run_torch
 
 
 def utc_ts() -> str:
@@ -55,15 +52,14 @@ def build_logger(log_file: Path) -> logging.Logger:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="NPU BUCKET/FULL_TUNE vs TORCH pipeline entry (prototype mandatory).")
+    parser = argparse.ArgumentParser(description="NPU BUCKET vs TORCH pipeline entry (prototype mandatory).")
     parser.add_argument("--op", type=str, default="matmul", choices=list_operators())
     parser.add_argument("--dtype", type=str, default="fp16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--tune-size", type=int, default=16)
-    parser.add_argument("--eval-size", type=int, default=8)
-    parser.add_argument("--prototype-count", type=int, default=8, help="必须 > 0")
+    parser.add_argument("--eval-size", type=int, default=16)
+    parser.add_argument("--prototype-count", type=int, default=4, help="必须 > 0")
     parser.add_argument("--warmup", type=int, default=5)
-    parser.add_argument("--repeat", type=int, default=5)
-    parser.add_argument("--speed-p", type=float, default=2.0, help="speed ratio 汇总的 power-mean 参数，默认 2")
+    parser.add_argument("--repeat", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260302)
     parser.add_argument("--bucket-splits", type=int, nargs="+", default=[4, 2048, 3072])
     parser.add_argument("--run-dir", type=str, default="")
@@ -134,9 +130,6 @@ class Pipeline:
         args = self.args
         if int(args.prototype_count) <= 0:
             raise ValueError(f"要求 --prototype-count > 0（当前: {args.prototype_count}）")
-        speed_p = float(args.speed_p)
-        if not math.isfinite(speed_p) or speed_p <= 0.0:
-            raise ValueError(f"要求 --speed-p > 0 且为有限数（当前: {args.speed_p}）")
         pipeline_start_utc = utc_iso()
         pipeline_t0 = time.time()
 
@@ -152,7 +145,6 @@ class Pipeline:
             args.repeat,
             args.bucket_splits,
         )
-        self.logger.info("speed_ratio_power_p=%s", speed_p)
 
         options = BenchmarkOptions(
             prototype_count=int(args.prototype_count),
@@ -170,6 +162,9 @@ class Pipeline:
         )
         benchmark_config: Optional[BenchmarkConfig] = None
         benchmark_state: Optional[BenchmarkState] = None
+        torch_pool = cf.ThreadPoolExecutor(max_workers=1)
+        torch_future: Optional[cf.Future[tuple[str, list[dict[str, object]]]]] = None
+        torch_launch_t0 = 0.0
 
         def require_context() -> tuple[BenchmarkConfig, BenchmarkState]:
             if benchmark_config is None or benchmark_state is None:
@@ -217,20 +212,15 @@ class Pipeline:
             config, state = require_context()
             return run_bucket(config, state)
 
-        def full_tune_stage() -> str:
-            config, _ = require_context()
-            ctx = mp.get_context("spawn")
-            try:
-                with cf.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-                    detail, rows = pool.submit(collect_full_tune_rows, options).result()
-                append_records(config.options.results_csv, rows)
-                return f"{detail},subprocess=1"
-            except Exception:
-                # Fallback keeps behavior correct if subprocess creation fails in runtime env.
-                return run_full_tune(options, config.options.results_csv)
-
         def torch_stage() -> str:
+            nonlocal torch_future
+            nonlocal torch_launch_t0
             config, state = require_context()
+            if torch_future is not None:
+                detail, rows = torch_future.result()
+                append_records(config.options.results_csv, rows)
+                async_wall_sec = int(time.time() - torch_launch_t0)
+                return f"{detail},async_capture=1,async_wall_sec={async_wall_sec}"
             return run_torch(config, state)
 
         def case_compare_stage() -> str:
@@ -248,17 +238,22 @@ class Pipeline:
                 self.run_dir,
                 self.summary_prefix,
                 compare_csv=self.case_compare_csv,
-                speed_power=speed_p,
             )
-            return f"overall={overall_path},tune={tune_path},bucket={bucket_path},speed_p={speed_p}"
+            return f"overall={overall_path},tune={tune_path},bucket={bucket_path}"
 
-        self.run_stage("setup_benchmark", setup_benchmark_stage)
-        self.run_stage("prototype", prototype_stage)
-        self.run_stage("benchmark_bucket", bucket_stage)
-        self.run_stage("benchmark_full_tune", full_tune_stage)
-        self.run_stage("benchmark_torch", torch_stage)
-        self.run_stage("case_compare", case_compare_stage)
-        self.run_stage("summary", summary_stage)
+        try:
+            self.run_stage("setup_benchmark", setup_benchmark_stage)
+            config, state = require_context()
+            torch_launch_t0 = time.time()
+            torch_future = torch_pool.submit(collect_torch_rows, config, state)
+            self.logger.info("START async_stage=benchmark_torch_capture")
+            self.run_stage("prototype", prototype_stage)
+            self.run_stage("benchmark_bucket", bucket_stage)
+            self.run_stage("benchmark_torch", torch_stage)
+            self.run_stage("case_compare", case_compare_stage)
+            self.run_stage("summary", summary_stage)
+        finally:
+            torch_pool.shutdown(wait=False, cancel_futures=False)
 
         total_elapsed_sec = int(time.time() - pipeline_t0)
         pipeline_end_utc = utc_iso()

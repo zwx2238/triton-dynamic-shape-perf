@@ -1,3 +1,0 @@
-stage,start_utc,end_utc,elapsed_sec,detail
-setup_benchmark,2026-03-04T04:06:05Z,2026-03-04T04:06:13Z,7,"results_csv=results/pipeline_repro_20260304T040605Z/bucket_torch.csv,reachable_keys=[4, 5, 6, 7],unreachable_keys=[0, 1, 2, 3],eval_keys=[4, 5, 6, 7]"
-prototype,2026-03-04T04:06:13Z,2026-03-04T04:06:42Z,29,"prototype_shapes=4[8x2048x4096,64x6144x1024,4x6144x1024,64x8192x8192] candidates=4[c24,c18,c29,c23] prototype_report_csv=results/pipeline_repro_20260304T040605Z/prototype_best.csv"
