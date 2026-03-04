@@ -176,7 +176,30 @@ class Pipeline:
             nonlocal benchmark_state
             benchmark_config = build_benchmark_config(options)
             benchmark_state = build_benchmark_state(options.op_name)
-            return f"results_csv={self.main_results_csv}"
+            op = benchmark_config.op
+            splits = options.bucket_splits
+            reachable_keys = sorted({int(op.eval_key(shape, splits)) for shape in benchmark_config.tune_set})
+            eval_keys = sorted({int(op.eval_key(shape, splits)) for shape in benchmark_config.eval_set})
+            all_keys = []
+            if hasattr(op, "all_bucket_keys"):
+                try:
+                    all_keys = sorted(int(k) for k in op.all_bucket_keys())
+                except Exception:  # noqa: BLE001
+                    all_keys = []
+            unreachable_keys = [k for k in all_keys if k not in set(reachable_keys)]
+            self.logger.info(
+                "bucket_key_info splits=%s reachable=%s unreachable=%s eval=%s",
+                list(splits),
+                reachable_keys,
+                unreachable_keys,
+                eval_keys,
+            )
+            return (
+                f"results_csv={self.main_results_csv},"
+                f"reachable_keys={reachable_keys},"
+                f"unreachable_keys={unreachable_keys},"
+                f"eval_keys={eval_keys}"
+            )
 
         def prototype_stage() -> str:
             config, state = require_context()

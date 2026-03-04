@@ -59,10 +59,6 @@ def _build_bucket_candidates(m_split: int, n_split: int, k_split: int) -> Dict[B
         for n in N_CHOICES:
             for k in K_CHOICES:
                 out[bucket_key(m, n, k, m_split, n_split, k_split)].append((m, n, k))
-
-    missing = [key for key in ALL_BUCKET_KEYS if not out.get(key)]
-    if missing:
-        raise RuntimeError(f"BUG: 新分桶存在不可达 key: {missing}")
     return dict(out)
 
 
@@ -96,7 +92,8 @@ def _ensure_bucket_key_coverage(
         key = bucket_key(m, n, k, m_split, n_split, k_split)
         positions_by_key[key].append(idx)
 
-    missing = [key for key in ALL_BUCKET_KEYS if key not in positions_by_key]
+    required_keys = sorted(bucket_candidates.keys())
+    missing = [key for key in required_keys if key not in positions_by_key]
     if not missing:
         return out
 
@@ -125,10 +122,12 @@ def build_tune_set(
     n_split: int,
     k_split: int,
 ) -> tuple[Shape, ...]:
-    if tune_size < len(ALL_BUCKET_KEYS):
-        raise RuntimeError(f"tune_size={tune_size} 太小，必须 >= {len(ALL_BUCKET_KEYS)} 以覆盖全部 8 个 key")
-
     bucket_candidates = _build_bucket_candidates(m_split, n_split, k_split)
+    reachable_keys = sorted(bucket_candidates.keys())
+    if tune_size < len(reachable_keys):
+        raise RuntimeError(
+            f"tune_size={tune_size} 太小，必须 >= {len(reachable_keys)} 以覆盖当前可达 key: {reachable_keys}"
+        )
     base = tune_size // len(ALL_DISTRIBUTION_KEYS)
     rem = tune_size % len(ALL_DISTRIBUTION_KEYS)
     out: List[Shape] = []
