@@ -1,5 +1,0 @@
-status=running
-stage=prototype
-updated_at=2026-03-04T08:08:10Z
-run_dir=results/pipeline_repro_20260304T080802Z
-log_file=results/pipeline_repro_20260304T080802Z/pipeline.log

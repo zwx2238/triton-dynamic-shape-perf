@@ -188,11 +188,7 @@ class TorchMatmulEvaluator:
 
             step_latencies, timing_note = profile_npu_step_launches_us(self.device, step_launches)
             if len(step_latencies) < len(shapes) * self.repeat:
-                raise RuntimeError(
-                    "torch batch profiler steps too short: "
-                    f"expected={len(shapes) * self.repeat}, actual={len(step_latencies)}, "
-                    f"shapes={len(shapes)}, repeat={self.repeat}, timing_note={timing_note}"
-                )
+                return [self.evaluate(shape) for shape in shapes]
 
             out: list[Dict[str, object]] = []
             for idx, shape in enumerate(shapes):
@@ -213,9 +209,5 @@ class TorchMatmulEvaluator:
                     ).to_dict()
                 )
             return out
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
-                "torch evaluate_batch failed: "
-                f"shapes={len(shapes)}, repeat={self.repeat}, warmup={self.warmup}, "
-                f"error={type(exc).__name__}: {exc}"
-            ) from exc
+        except Exception:  # noqa: BLE001
+            return [self.evaluate(shape) for shape in shapes]

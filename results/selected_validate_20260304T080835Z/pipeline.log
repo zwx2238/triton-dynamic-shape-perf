@@ -1,6 +1,0 @@
-[2026-03-04T08:08:35Z] run_dir=results/selected_validate_20260304T080835Z
-[2026-03-04T08:08:35Z] params: op=matmul dtype=fp16 tune_size=16 eval_size=8 sample_p=8 warmup=5 repeat=5 bucket_splits=[4, 2048, 3072]
-[2026-03-04T08:08:35Z] speed_ratio_power_p=2.0
-[2026-03-04T08:08:35Z] START stage=setup_benchmark
-[2026-03-04T08:08:43Z] END stage=setup_benchmark elapsed_sec=7
-[2026-03-04T08:08:43Z] START stage=select_c2_from_sampled_full_tune

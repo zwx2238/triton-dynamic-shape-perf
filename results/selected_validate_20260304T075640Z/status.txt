@@ -1,5 +1,0 @@
-status=running
-stage=select_c2_from_sampled_full_tune
-updated_at=2026-03-04T07:56:48Z
-run_dir=results/selected_validate_20260304T075640Z
-log_file=results/selected_validate_20260304T075640Z/pipeline.log

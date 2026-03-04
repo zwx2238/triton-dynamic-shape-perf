@@ -1,8 +1,0 @@
-[2026-03-04T08:08:02Z] run_dir=results/pipeline_repro_20260304T080802Z
-[2026-03-04T08:08:02Z] op=matmul
-[2026-03-04T08:08:02Z] params: dtype=fp16 tune_size=16 eval_size=8 prototype_count=8 warmup=5 repeat=5 bucket_splits=[4, 2048, 3072]
-[2026-03-04T08:08:02Z] speed_ratio_power_p=2.0
-[2026-03-04T08:08:02Z] START stage=setup_benchmark
-[2026-03-04T08:08:10Z] bucket_key_info splits=[4, 2048, 3072] reachable=[0, 1, 2, 3, 4, 5, 6, 7] unreachable=[] eval=[0, 1, 2, 3]
-[2026-03-04T08:08:10Z] END stage=setup_benchmark elapsed_sec=7
-[2026-03-04T08:08:10Z] START stage=prototype
