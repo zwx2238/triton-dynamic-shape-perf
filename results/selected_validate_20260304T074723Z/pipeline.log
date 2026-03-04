@@ -1,0 +1,28 @@
+[2026-03-04T07:47:23Z] run_dir=results/selected_validate_20260304T074723Z
+[2026-03-04T07:47:23Z] params: op=matmul dtype=fp16 tune_size=8 eval_size=2 sample_p=2 warmup=1 repeat=1 bucket_splits=[4, 2048, 3072]
+[2026-03-04T07:47:23Z] speed_ratio_power_p=2.0
+[2026-03-04T07:47:23Z] START stage=setup_benchmark
+[2026-03-04T07:47:31Z] END stage=setup_benchmark elapsed_sec=7
+[2026-03-04T07:47:31Z] START stage=select_c2_from_sampled_full_tune
+[2026-03-04T07:51:09Z] END stage=select_c2_from_sampled_full_tune elapsed_sec=218
+[2026-03-04T07:51:09Z] START stage=benchmark_full_tune_validate
+[2026-03-04T07:51:25Z] END stage=benchmark_full_tune_validate elapsed_sec=16
+[2026-03-04T07:51:25Z] START stage=benchmark_torch
+[2026-03-04T07:51:40Z] END stage=benchmark_torch elapsed_sec=15
+[2026-03-04T07:51:40Z] START stage=case_compare
+[2026-03-04T07:51:40Z] END stage=case_compare elapsed_sec=0
+[2026-03-04T07:51:40Z] START stage=summary
+[2026-03-04T07:51:40Z] END stage=summary elapsed_sec=0
+[2026-03-04T07:51:40Z] START stage=metric_gate
+[2026-03-04T07:51:40Z] END stage=metric_gate elapsed_sec=0
+[2026-03-04T07:51:40Z] stage_elapsed_sec=setup_benchmark:7,select_c2_from_sampled_full_tune:218,benchmark_full_tune_validate:16,benchmark_torch:15,case_compare:0,summary:0,metric_gate:0
+[2026-03-04T07:51:40Z] TOTAL elapsed_sec=257
+[2026-03-04T07:51:40Z] DONE
+[2026-03-04T07:51:40Z] outputs:
+[2026-03-04T07:51:40Z]   - results/selected_validate_20260304T074723Z/full_tune_torch.csv
+[2026-03-04T07:51:40Z]   - results/selected_validate_20260304T074723Z/sampled_full_tune_picks.csv
+[2026-03-04T07:51:40Z]   - results/selected_validate_20260304T074723Z/selected_c2_configs.csv
+[2026-03-04T07:51:40Z]   - results/selected_validate_20260304T074723Z/full_tune_torch_case_compare_eval.csv
+[2026-03-04T07:51:40Z]   - results/selected_validate_20260304T074723Z/full_tune_torch_summary_overall.csv
+[2026-03-04T07:51:40Z]   - results/selected_validate_20260304T074723Z/full_tune_torch_summary_tune.csv
+[2026-03-04T07:51:40Z]   - results/selected_validate_20260304T074723Z/full_tune_torch_summary_by_bucket.csv

@@ -318,7 +318,11 @@ class TritonMatmulEvaluator:
 
             step_latencies, timing_note = profile_npu_step_launches_us(self.device, step_launches)
             if len(step_latencies) < len(entries) * self.repeat:
-                return [self.evaluate(shape, cfg) for shape, cfg in entries]
+                raise RuntimeError(
+                    "triton batch profiler steps too short: "
+                    f"expected={len(entries) * self.repeat}, actual={len(step_latencies)}, "
+                    f"entries={len(entries)}, repeat={self.repeat}, timing_note={timing_note}"
+                )
 
             out: list[Dict[str, object]] = []
             for idx, (shape, _) in enumerate(entries):
@@ -343,5 +347,9 @@ class TritonMatmulEvaluator:
                     ).to_dict()
                 )
             return out
-        except Exception:  # noqa: BLE001
-            return [self.evaluate(shape, cfg) for shape, cfg in entries]
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "triton evaluate_batch failed: "
+                f"entries={len(entries)}, repeat={self.repeat}, warmup={self.warmup}, "
+                f"error={type(exc).__name__}: {exc}"
+            ) from exc

@@ -1,0 +1,5 @@
+status=done
+stage=all_done
+updated_at=2026-03-04T07:51:40Z
+run_dir=results/selected_validate_20260304T074723Z
+log_file=results/selected_validate_20260304T074723Z/pipeline.log

@@ -15,7 +15,8 @@ class MatmulConfig:
 
 _BM_FIXED = 16
 _TILE_MULTIPLE = 16
-_BUF_CAP_BYTES = 512 * 1024
+_L0C_CAP_BYTES = 128 * 1024
+_L1_CAP_BYTES = 512 * 1024
 _L1_DOUBLE_BUFFER = 2
 _NUM_BASE_CONFIGS = 8
 _DIVERSITY_TOP_MIN_LEVELS = 16
@@ -34,24 +35,24 @@ class _TileCandidate:
 def _is_feasible_tile(bn: int, bk: int) -> bool:
     l0c_bytes = _BM_FIXED * bn * 4
     l1_bytes = (_BM_FIXED * bk + bk * bn) * 4 * _L1_DOUBLE_BUFFER
-    return l0c_bytes <= _BUF_CAP_BYTES and l1_bytes <= _BUF_CAP_BYTES
+    return l0c_bytes <= _L0C_CAP_BYTES and l1_bytes <= _L1_CAP_BYTES
 
 
 def _iter_tile_candidates() -> List[_TileCandidate]:
     out: List[_TileCandidate] = []
     for bn in range(_TILE_MULTIPLE, 8192 + _TILE_MULTIPLE, _TILE_MULTIPLE):
         l0c_bytes = _BM_FIXED * bn * 4
-        if l0c_bytes > _BUF_CAP_BYTES:
+        if l0c_bytes > _L0C_CAP_BYTES:
             break
         for bk in range(_TILE_MULTIPLE, 8192 + _TILE_MULTIPLE, _TILE_MULTIPLE):
             l1_bytes = (_BM_FIXED * bk + bk * bn) * 4 * _L1_DOUBLE_BUFFER
-            if l1_bytes > _BUF_CAP_BYTES:
+            if l1_bytes > _L1_CAP_BYTES:
                 break
             # Mirror tiles are equivalent for this candidate seed pool.
             if bn < bk:
                 continue
-            util_l0c = l0c_bytes / _BUF_CAP_BYTES
-            util_l1 = l1_bytes / _BUF_CAP_BYTES
+            util_l0c = l0c_bytes / _L0C_CAP_BYTES
+            util_l1 = l1_bytes / _L1_CAP_BYTES
             out.append(
                 _TileCandidate(
                     bn=bn,

@@ -1,0 +1,5 @@
+status=failed
+stage=select_c2_from_sampled_full_tune
+updated_at=2026-03-04T08:01:45Z
+run_dir=results/selected_validate_20260304T080130Z
+log_file=results/selected_validate_20260304T080130Z/pipeline.log

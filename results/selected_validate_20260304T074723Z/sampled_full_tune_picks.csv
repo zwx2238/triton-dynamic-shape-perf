@@ -1,0 +1,3 @@
+shape,picked_config_id,BLOCK_M,BLOCK_N,BLOCK_K,runtime_cost_us,invalid_config,notes
+4x1536x3072,c00,16,256,240,15.46,0,"path_reordered,ASCEND_HOME_PATH_set,ASCEND_TOOLKIT_HOME_set;launch=fixed_cores(6),swizzle2d_g=4,dir=1;timing=npu_profiler_offline_kernel_details"
+64x1536x4096,c00,16,256,240,20.2,0,"path_reordered,ASCEND_HOME_PATH_set,ASCEND_TOOLKIT_HOME_set;launch=fixed_cores(24),swizzle2d_g=4,dir=1;timing=npu_profiler_offline_kernel_details"
