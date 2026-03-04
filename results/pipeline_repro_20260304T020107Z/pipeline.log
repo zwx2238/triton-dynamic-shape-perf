@@ -1,0 +1,24 @@
+[2026-03-04T02:01:07Z] run_dir=results/pipeline_repro_20260304T020107Z
+[2026-03-04T02:01:07Z] op=matmul
+[2026-03-04T02:01:07Z] params: dtype=fp16 tune_size=16 eval_size=16 prototype_count=4 warmup=5 repeat=10 bucket_splits=[4, 2048, 3072]
+[2026-03-04T02:01:07Z] START stage=setup_benchmark
+[2026-03-04T02:01:07Z] END stage=setup_benchmark elapsed_sec=0
+[2026-03-04T02:01:07Z] START stage=prototype
+[2026-03-04T02:01:36Z] prototype_candidate_ids=c18,c16,c29
+[2026-03-04T02:01:36Z] END stage=prototype elapsed_sec=29
+[2026-03-04T02:01:36Z] START stage=benchmark_bucket
+[2026-03-04T02:02:28Z] END stage=benchmark_bucket elapsed_sec=51
+[2026-03-04T02:02:28Z] START stage=benchmark_torch
+[2026-03-04T02:02:39Z] END stage=benchmark_torch elapsed_sec=10
+[2026-03-04T02:02:39Z] START stage=case_compare
+[2026-03-04T02:02:39Z] END stage=case_compare elapsed_sec=0
+[2026-03-04T02:02:39Z] START stage=summary
+[2026-03-04T02:02:39Z] END stage=summary elapsed_sec=0
+[2026-03-04T02:02:39Z] DONE
+[2026-03-04T02:02:39Z] outputs:
+[2026-03-04T02:02:39Z]   - results/pipeline_repro_20260304T020107Z/prototype_best.csv
+[2026-03-04T02:02:39Z]   - results/pipeline_repro_20260304T020107Z/bucket_torch.csv
+[2026-03-04T02:02:39Z]   - results/pipeline_repro_20260304T020107Z/bucket_torch_case_compare_eval.csv
+[2026-03-04T02:02:39Z]   - results/pipeline_repro_20260304T020107Z/bucket_torch_summary_overall.csv
+[2026-03-04T02:02:39Z]   - results/pipeline_repro_20260304T020107Z/bucket_torch_summary_tune.csv
+[2026-03-04T02:02:39Z]   - results/pipeline_repro_20260304T020107Z/bucket_torch_summary_by_bucket.csv
