@@ -40,6 +40,15 @@ def _write_csv(path: Path, fieldnames: List[str], rows: Iterable[Dict[str, objec
             writer.writerow(row)
 
 
+def _shape_sort_key(shape_id: str) -> Tuple[int, str]:
+    if not shape_id:
+        return (10**9, "")
+    tail = shape_id.split("_")[-1]
+    if tail.isdigit():
+        return (int(tail), shape_id)
+    return (10**9, shape_id)
+
+
 def _print_section(title: str, rows: List[Dict[str, object]], headers: List[str]) -> None:
     print(f"\n=== {title} ===")
     if not rows:
@@ -60,7 +69,52 @@ def _print_section(title: str, rows: List[Dict[str, object]], headers: List[str]
         print("  ".join(str(row.get(h, "")).ljust(widths[h]) for h in headers))
 
 
-def summarize(input_csv: Path, out_dir: Path, prefix: str) -> Tuple[Path, Path, Path]:
+def _print_case_compare(compare_csv: Path) -> None:
+    if not compare_csv.exists():
+        print(f"\n=== CASE COMPARE (EVAL) ===\n(missing file: {compare_csv})")
+        return
+
+    with compare_csv.open("r", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    display_rows: List[Dict[str, object]] = []
+    for row in rows:
+        shape = str(row.get("shape", "")).strip()
+        if not shape:
+            m = str(row.get("M", "")).strip()
+            n = str(row.get("N", "")).strip()
+            k = str(row.get("K", "")).strip()
+            shape = f"{m}x{n}x{k}" if m and n and k else ""
+        display_rows.append(
+            {
+                "shape_id": row.get("shape_id", ""),
+                "shape": shape,
+                "config_torch": row.get("config_desc_TORCH", "") or row.get("config_id_TORCH", ""),
+                "config_bucket": row.get("config_desc_BUCKET", "") or row.get("config_id_BUCKET", ""),
+                "runtime_torch_us": row.get("runtime_cost_us_TORCH", ""),
+                "runtime_bucket_us": row.get("runtime_cost_us_BUCKET", ""),
+                "ratio": row.get("ratio_BUCKET_over_TORCH", ""),
+                "delta_us": row.get("delta_us_BUCKET_minus_TORCH", ""),
+            }
+        )
+    display_rows.sort(key=lambda r: _shape_sort_key(str(r.get("shape_id", ""))))
+    _print_section(
+        "CASE COMPARE (EVAL)",
+        display_rows,
+        [
+            "shape_id",
+            "shape",
+            "config_torch",
+            "config_bucket",
+            "runtime_torch_us",
+            "runtime_bucket_us",
+            "ratio",
+            "delta_us",
+        ],
+    )
+
+
+def summarize(input_csv: Path, out_dir: Path, prefix: str, compare_csv: Path | None = None) -> Tuple[Path, Path, Path]:
     with input_csv.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
@@ -188,5 +242,7 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str) -> Tuple[Path, Path, 
         by_bucket_rows,
         ["method", "bucket_key", "samples", "median_runtime_us"],
     )
+    if compare_csv is not None:
+        _print_case_compare(compare_csv)
 
     return overall_path, tune_path, bucket_path

@@ -233,7 +233,12 @@ class Pipeline:
             return f"case_compare_csv={out_csv},rows={rows}"
 
         def summary_stage() -> str:
-            overall_path, tune_path, bucket_path = summarize(self.main_results_csv, self.run_dir, self.summary_prefix)
+            overall_path, tune_path, bucket_path = summarize(
+                self.main_results_csv,
+                self.run_dir,
+                self.summary_prefix,
+                compare_csv=self.case_compare_csv,
+            )
             return f"overall={overall_path},tune={tune_path},bucket={bucket_path}"
 
         try:

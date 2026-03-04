@@ -40,6 +40,33 @@ def _timing_family(timing: str) -> str:
     return "unknown"
 
 
+def _format_shape(row: Dict[str, str]) -> str:
+    m = str(row.get("M", "")).strip()
+    n = str(row.get("N", "")).strip()
+    k = str(row.get("K", "")).strip()
+    if m and n and k:
+        return f"{m}x{n}x{k}"
+    return ""
+
+
+def _format_config_desc(method: str, row: Dict[str, str]) -> str:
+    if method == "BUCKET":
+        bm = str(row.get("BLOCK_M", "")).strip()
+        bn = str(row.get("BLOCK_N", "")).strip()
+        bk = str(row.get("BLOCK_K", "")).strip()
+        if bm and bn and bk and bm != "-1" and bn != "-1" and bk != "-1":
+            return f"BM={bm},BN={bn},BK={bk}"
+    if method == "TORCH":
+        dtype = str(row.get("dtype", "")).strip() or "unknown"
+        device = "npu"
+        config_id = str(row.get("config_id", "")).strip()
+        prefix = "torch_mm_"
+        if config_id.startswith(prefix) and len(config_id) > len(prefix):
+            device = config_id[len(prefix):]
+        return f"torch.mm(dtype={dtype},device={device})"
+    return str(row.get("config_id", "")).strip()
+
+
 PER_METHOD_COLS = {
     "method", "config_id", "compile_time_ms", "tune_time_ms",
     "runtime_cost_us", "cache_key", "invalid_config", "notes", "timestamp",
@@ -102,6 +129,8 @@ def compare_case_runtime(
             )
 
     shared_cols = [c for c in all_columns if c not in PER_METHOD_COLS and c != "split"]
+    if "shape" not in shared_cols:
+        shared_cols.append("shape")
 
     table: Dict[str, Dict[str, str]] = {}
 
@@ -112,14 +141,18 @@ def compare_case_runtime(
 
         shape_id = row.get("shape_id", "")
         out = table.setdefault(shape_id, {c: row.get(c, "") for c in shared_cols})
+        if "shape" not in out or not str(out.get("shape", "")).strip():
+            out["shape"] = _format_shape(row)
 
         out[f"runtime_cost_us_{method}"] = row.get("runtime_cost_us", "")
         out[f"config_id_{method}"] = row.get("config_id", "")
+        out[f"config_desc_{method}"] = _format_config_desc(method, row)
         out[f"invalid_config_{method}"] = row.get("invalid_config", "")
         out[f"timing_source_{method}"] = _extract_timing(row.get("notes", ""))
 
     runtime_cols = [f"runtime_cost_us_{m}" for m in methods]
     cfg_cols = [f"config_id_{m}" for m in methods]
+    cfg_desc_cols = [f"config_desc_{m}" for m in methods]
     invalid_cols = [f"invalid_config_{m}" for m in methods]
     timing_cols = [f"timing_source_{m}" for m in methods]
     ratio_cols: List[str] = ["ratio_BUCKET_over_TORCH"]
@@ -147,6 +180,7 @@ def compare_case_runtime(
         *shared_cols,
         *runtime_cols,
         *cfg_cols,
+        *cfg_desc_cols,
         *invalid_cols,
         *timing_cols,
         *ratio_cols,
