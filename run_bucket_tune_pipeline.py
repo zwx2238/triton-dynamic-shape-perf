@@ -52,12 +52,17 @@ def build_logger(log_file: Path) -> logging.Logger:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="NPU BUCKET vs TORCH pipeline entry (prototype mandatory).")
+    parser = argparse.ArgumentParser(description="NPU BUCKET vs TORCH pipeline entry.")
     parser.add_argument("--op", type=str, default="matmul", choices=list_operators())
     parser.add_argument("--dtype", type=str, default="fp16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--tune-size", type=int, default=16)
     parser.add_argument("--eval-size", type=int, default=16)
-    parser.add_argument("--prototype-count", type=int, default=4, help="必须 > 0")
+    parser.add_argument(
+        "--prototype-count",
+        type=int,
+        default=0,
+        help="prototype 选取典型 shape 的数量；=0 表示跳过 prototype（默认）",
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repeat", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260302)
@@ -128,8 +133,8 @@ class Pipeline:
 
     def run(self) -> None:
         args = self.args
-        if int(args.prototype_count) <= 0:
-            raise ValueError(f"要求 --prototype-count > 0（当前: {args.prototype_count}）")
+        if int(args.prototype_count) < 0:
+            raise ValueError(f"要求 --prototype-count >= 0（当前: {args.prototype_count}）")
         pipeline_start_utc = utc_iso()
         pipeline_t0 = time.time()
 
@@ -247,7 +252,10 @@ class Pipeline:
             torch_launch_t0 = time.time()
             torch_future = torch_pool.submit(collect_torch_rows, config, state)
             self.logger.info("START async_stage=benchmark_torch_capture")
-            self.run_stage("prototype", prototype_stage)
+            if int(args.prototype_count) > 0:
+                self.run_stage("prototype", prototype_stage)
+            else:
+                self.logger.info("SKIP stage=prototype reason=prototype_count=0 (no config filtering)")
             self.run_stage("benchmark_bucket", bucket_stage)
             self.run_stage("benchmark_torch", torch_stage)
             self.run_stage("case_compare", case_compare_stage)

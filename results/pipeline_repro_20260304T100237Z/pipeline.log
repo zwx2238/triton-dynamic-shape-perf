@@ -1,0 +1,26 @@
+[2026-03-04T10:02:37Z] run_dir=results/pipeline_repro_20260304T100237Z
+[2026-03-04T10:02:37Z] op=matmul
+[2026-03-04T10:02:37Z] params: dtype=fp16 tune_size=16 eval_size=16 prototype_count=0 warmup=0 repeat=5 bucket_splits=[64, 2048, 3072]
+[2026-03-04T10:02:37Z] START stage=setup_benchmark
+[2026-03-04T10:02:44Z] bucket_key_info splits=[64, 2048, 3072] reachable=[4, 5, 6, 7] unreachable=[0, 1, 2, 3] eval=[4, 5, 6, 7]
+[2026-03-04T10:02:44Z] END stage=setup_benchmark elapsed_sec=7
+[2026-03-04T10:02:44Z] START async_stage=benchmark_torch_capture
+[2026-03-04T10:02:44Z] SKIP stage=prototype reason=prototype_count=0 (no config filtering)
+[2026-03-04T10:02:44Z] START stage=benchmark_bucket
+[2026-03-04T10:03:26Z] END stage=benchmark_bucket elapsed_sec=41
+[2026-03-04T10:03:26Z] START stage=benchmark_torch
+[2026-03-04T10:03:26Z] END stage=benchmark_torch elapsed_sec=0
+[2026-03-04T10:03:26Z] START stage=case_compare
+[2026-03-04T10:03:26Z] END stage=case_compare elapsed_sec=0
+[2026-03-04T10:03:26Z] START stage=summary
+[2026-03-04T10:03:26Z] END stage=summary elapsed_sec=0
+[2026-03-04T10:03:26Z] stage_elapsed_sec=setup_benchmark:7,benchmark_bucket:41,benchmark_torch:0,case_compare:0,summary:0
+[2026-03-04T10:03:26Z] TOTAL elapsed_sec=49
+[2026-03-04T10:03:26Z] DONE
+[2026-03-04T10:03:26Z] outputs:
+[2026-03-04T10:03:26Z]   - results/pipeline_repro_20260304T100237Z/prototype_best.csv
+[2026-03-04T10:03:26Z]   - results/pipeline_repro_20260304T100237Z/bucket_torch.csv
+[2026-03-04T10:03:26Z]   - results/pipeline_repro_20260304T100237Z/bucket_torch_case_compare_eval.csv
+[2026-03-04T10:03:26Z]   - results/pipeline_repro_20260304T100237Z/bucket_torch_summary_overall.csv
+[2026-03-04T10:03:26Z]   - results/pipeline_repro_20260304T100237Z/bucket_torch_summary_tune.csv
+[2026-03-04T10:03:26Z]   - results/pipeline_repro_20260304T100237Z/bucket_torch_summary_by_bucket.csv

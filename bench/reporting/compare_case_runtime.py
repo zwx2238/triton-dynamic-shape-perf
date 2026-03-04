@@ -51,11 +51,14 @@ def _format_shape(row: Dict[str, str]) -> str:
 
 def _format_config_desc(method: str, row: Dict[str, str]) -> str:
     if method == "BUCKET":
+        cfg_id = str(row.get("config_id", "")).strip()
         bm = str(row.get("BLOCK_M", "")).strip()
         bn = str(row.get("BLOCK_N", "")).strip()
         bk = str(row.get("BLOCK_K", "")).strip()
         if bm and bn and bk and bm != "-1" and bn != "-1" and bk != "-1":
-            return f"BM={bm},BN={bn},BK={bk}"
+            core = f"BM={bm},BN={bn},BK={bk}"
+            return f"{cfg_id} {core}".strip()
+        return cfg_id
     if method == "TORCH":
         dtype = str(row.get("dtype", "")).strip() or "unknown"
         device = "npu"
@@ -145,34 +148,31 @@ def compare_case_runtime(
             out["shape"] = _format_shape(row)
 
         out[f"runtime_cost_us_{method}"] = row.get("runtime_cost_us", "")
-        out[f"config_id_{method}"] = row.get("config_id", "")
-        out[f"config_desc_{method}"] = _format_config_desc(method, row)
+        if method != "TORCH":
+            out[f"config_id_{method}"] = row.get("config_id", "")
+            out[f"config_desc_{method}"] = _format_config_desc(method, row)
         out[f"invalid_config_{method}"] = row.get("invalid_config", "")
         out[f"timing_source_{method}"] = _extract_timing(row.get("notes", ""))
 
     runtime_cols = [f"runtime_cost_us_{m}" for m in methods]
-    cfg_cols = [f"config_id_{m}" for m in methods]
-    cfg_desc_cols = [f"config_desc_{m}" for m in methods]
+    target_methods = [m for m in methods if m != "TORCH"]
+    cfg_cols = [f"config_id_{m}" for m in target_methods]
+    cfg_desc_cols = [f"config_desc_{m}" for m in target_methods]
     invalid_cols = [f"invalid_config_{m}" for m in methods]
     timing_cols = [f"timing_source_{m}" for m in methods]
-    ratio_cols: List[str] = ["ratio_BUCKET_over_TORCH"]
-    delta_cols: List[str] = ["delta_us_BUCKET_minus_TORCH"]
+    speedup_cols: List[str] = [f"speedup_{m}_vs_TORCH" for m in target_methods]
 
     out_rows = list(table.values())
     for row in out_rows:
-        base = _to_float(row.get("runtime_cost_us_TORCH", ""))
-        for m in methods:
-            if m == "TORCH":
-                continue
+        base_torch = _to_float(row.get("runtime_cost_us_TORCH", ""))
+        for m in target_methods:
             cur = _to_float(row.get(f"runtime_cost_us_{m}", ""))
-            ratio_col = f"ratio_{m}_over_TORCH"
-            delta_col = f"delta_us_{m}_minus_TORCH"
-            if base > 0 and cur > 0:
-                row[ratio_col] = f"{cur / base:.6f}"
-                row[delta_col] = f"{cur - base:.6f}"
+            speedup_col = f"speedup_{m}_vs_TORCH"
+            if base_torch > 0 and cur > 0:
+                # Torch is baseline: speedup = runtime_torch / runtime_method.
+                row[speedup_col] = f"{base_torch / cur:.6f}"
             else:
-                row[ratio_col] = ""
-                row[delta_col] = ""
+                row[speedup_col] = ""
 
     out_rows.sort(key=lambda r: _shape_sort_key(r.get("shape_id", "")))
 
@@ -183,8 +183,7 @@ def compare_case_runtime(
         *cfg_desc_cols,
         *invalid_cols,
         *timing_cols,
-        *ratio_cols,
-        *delta_cols,
+        *speedup_cols,
     ]
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)

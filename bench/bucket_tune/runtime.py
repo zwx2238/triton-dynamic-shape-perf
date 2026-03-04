@@ -11,8 +11,8 @@ from .types import BenchmarkConfig, BenchmarkOptions, BenchmarkState
 
 
 def build_benchmark_config(options: BenchmarkOptions) -> BenchmarkConfig:
-    if options.prototype_count <= 0:
-        raise ValueError(f"prototype-count 必须 > 0，当前: {options.prototype_count}")
+    if options.prototype_count < 0:
+        raise ValueError(f"prototype-count 必须 >= 0，当前: {options.prototype_count}")
 
     op = get_operator(options.op_name)
     rng_tune = random.Random(options.seed + 1)

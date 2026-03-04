@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import statistics
 from collections import defaultdict
 from pathlib import Path
@@ -29,6 +30,13 @@ def _to_int(row: Dict[str, str], key: str, default: int = 0) -> int:
 
 def _fmt(value: float) -> str:
     return f"{value:.6f}"
+
+
+def _geometric_mean(values: Iterable[float]) -> float:
+    vals = [v for v in values if v > 0]
+    if not vals:
+        return 0.0
+    return math.exp(statistics.fmean(math.log(v) for v in vals))
 
 
 def _write_csv(path: Path, fieldnames: List[str], rows: Iterable[Dict[str, object]]) -> None:
@@ -77,7 +85,15 @@ def _print_case_compare(compare_csv: Path) -> None:
     with compare_csv.open("r", newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
+    speedup_col = ""
+    if rows:
+        for col in rows[0].keys():
+            if col.startswith("speedup_") and col.endswith("_vs_TORCH"):
+                speedup_col = col
+                break
+
     display_rows: List[Dict[str, object]] = []
+    speedup_vals: List[float] = []
     for row in rows:
         shape = str(row.get("shape", "")).strip()
         if not shape:
@@ -85,31 +101,45 @@ def _print_case_compare(compare_csv: Path) -> None:
             n = str(row.get("N", "")).strip()
             k = str(row.get("K", "")).strip()
             shape = f"{m}x{n}x{k}" if m and n and k else ""
+        speedup_text = row.get(speedup_col, "") if speedup_col else ""
+        try:
+            speedup_value = float(speedup_text) if speedup_text not in ("", None) else 0.0
+        except (TypeError, ValueError):
+            speedup_value = 0.0
+        if speedup_value > 0:
+            speedup_vals.append(speedup_value)
         display_rows.append(
             {
                 "shape_id": row.get("shape_id", ""),
                 "shape": shape,
-                "config_torch": row.get("config_desc_TORCH", "") or row.get("config_id_TORCH", ""),
                 "config_bucket": row.get("config_desc_BUCKET", "") or row.get("config_id_BUCKET", ""),
                 "runtime_torch_us": row.get("runtime_cost_us_TORCH", ""),
                 "runtime_bucket_us": row.get("runtime_cost_us_BUCKET", ""),
-                "ratio": row.get("ratio_BUCKET_over_TORCH", ""),
-                "delta_us": row.get("delta_us_BUCKET_minus_TORCH", ""),
+                "speedup": speedup_text,
             }
         )
     display_rows.sort(key=lambda r: _shape_sort_key(str(r.get("shape_id", ""))))
+    gm_speedup = _geometric_mean(speedup_vals)
+    display_rows.append(
+        {
+            "shape_id": "speedup_vs_torch",
+            "shape": "geomean",
+            "config_bucket": "",
+            "runtime_torch_us": "",
+            "runtime_bucket_us": "",
+            "speedup": _fmt(gm_speedup) if gm_speedup > 0 else "",
+        }
+    )
     _print_section(
         "CASE COMPARE (EVAL)",
         display_rows,
         [
             "shape_id",
             "shape",
-            "config_torch",
             "config_bucket",
             "runtime_torch_us",
             "runtime_bucket_us",
-            "ratio",
-            "delta_us",
+            "speedup",
         ],
     )
 
@@ -140,7 +170,6 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str, compare_csv: Path | N
     methods = sorted(set(eval_by_method.keys()) | set(tune_by_method.keys()), key=lambda x: (method_order.get(x, 99), x))
 
     overall_rows: List[Dict[str, object]] = []
-    torch_p50 = None
 
     for method in methods:
         eval_rows = eval_by_method.get(method, [])
@@ -167,17 +196,51 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str, compare_csv: Path | N
             "mean_runtime_us": _fmt(mean_runtime),
             "speedup_vs_torch": "",
         }
-        if method == "TORCH":
-            torch_p50 = median_runtime
         overall_rows.append(row)
 
-    if torch_p50 and torch_p50 > 0:
-        for row in overall_rows:
-            median_raw = row.get("median_runtime_us", "")
-            if not median_raw:
-                continue
-            median_value = float(median_raw)
-            row["speedup_vs_torch"] = _fmt(torch_p50 / median_value if median_value > 0 else 0.0)
+    torch_runtime_by_shape: Dict[str, List[float]] = defaultdict(list)
+    for row in eval_by_method.get("TORCH", []):
+        shape_id = str(row.get("shape_id", "")).strip()
+        runtime = _to_float(row, "runtime_cost_us")
+        if shape_id and runtime > 0:
+            torch_runtime_by_shape[shape_id].append(runtime)
+    torch_median_by_shape = {
+        shape_id: statistics.median(vals)
+        for shape_id, vals in torch_runtime_by_shape.items()
+        if vals
+    }
+
+    method_runtime_by_shape: Dict[str, Dict[str, float]] = {}
+    for method in methods:
+        grouped: Dict[str, List[float]] = defaultdict(list)
+        for row in eval_by_method.get(method, []):
+            shape_id = str(row.get("shape_id", "")).strip()
+            runtime = _to_float(row, "runtime_cost_us")
+            if shape_id and runtime > 0:
+                grouped[shape_id].append(runtime)
+        method_runtime_by_shape[method] = {
+            shape_id: statistics.median(vals)
+            for shape_id, vals in grouped.items()
+            if vals
+        }
+
+    overall_row_by_method = {str(r.get("method", "")): r for r in overall_rows}
+    for method in methods:
+        row = overall_row_by_method.get(method)
+        if row is None:
+            continue
+        if method == "TORCH":
+            row["speedup_vs_torch"] = _fmt(1.0) if row.get("samples", 0) else ""
+            continue
+
+        runtime_by_shape = method_runtime_by_shape.get(method, {})
+        ratios: List[float] = []
+        for shape_id, torch_runtime in torch_median_by_shape.items():
+            cur_runtime = runtime_by_shape.get(shape_id, 0.0)
+            if torch_runtime > 0 and cur_runtime > 0:
+                ratios.append(torch_runtime / cur_runtime)
+
+        row["speedup_vs_torch"] = _fmt(_geometric_mean(ratios)) if ratios else ""
 
     tune_rows: List[Dict[str, object]] = []
     for method in methods:
@@ -228,19 +291,9 @@ def summarize(input_csv: Path, out_dir: Path, prefix: str, compare_csv: Path | N
     )
 
     _print_section(
-        "OVERALL (EVAL)",
-        overall_rows,
-        ["method", "samples", "median_runtime_us", "mean_runtime_us", "speedup_vs_torch"],
-    )
-    _print_section(
         "TUNE COST",
         tune_rows,
         ["method", "tune_rows", "tuned_nonzero", "total_tune_ms", "total_compile_ms"],
-    )
-    _print_section(
-        "BY BUCKET (EVAL)",
-        by_bucket_rows,
-        ["method", "bucket_key", "samples", "median_runtime_us"],
     )
     if compare_csv is not None:
         _print_case_compare(compare_csv)

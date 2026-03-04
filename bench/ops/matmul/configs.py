@@ -12,38 +12,18 @@ class MatmulConfig:
     BLOCK_K: int
 
 
+_BASE_BLOCKS: List[tuple[int, int, int]] = [
+    (16, 128, 128),
+    (32, 128, 128),
+    (64, 128, 128),
+    (64, 256, 64),
+    (64, 128, 256),
+    (64, 64, 512),
+]
+
 BASE_CONFIGS: List[MatmulConfig] = [
-    MatmulConfig("c00", 32, 32, 32),
-    MatmulConfig("c01", 64, 32, 32),
-    MatmulConfig("c02", 32, 64, 32),
-    MatmulConfig("c03", 64, 64, 32),
-    MatmulConfig("c04", 64, 64, 64),
-    MatmulConfig("c05", 128, 64, 32),
-    MatmulConfig("c06", 64, 128, 32),
-    MatmulConfig("c07", 128, 128, 32),
-    MatmulConfig("c08", 128, 128, 64),
-    MatmulConfig("c09", 128, 64, 64),
-    MatmulConfig("c10", 64, 128, 64),
-    MatmulConfig("c11", 32, 128, 32),
-    MatmulConfig("c12", 128, 128, 128),
-    MatmulConfig("c13", 128, 128, 96),
-    MatmulConfig("c14", 128, 128, 64),
-    MatmulConfig("c15", 128, 96, 128),
-    MatmulConfig("c16", 96, 128, 128),
-    MatmulConfig("c17", 128, 64, 128),
-    MatmulConfig("c18", 64, 128, 128),
-    MatmulConfig("c19", 256, 128, 64),
-    MatmulConfig("c20", 128, 256, 64),
-    MatmulConfig("c21", 256, 64, 64),
-    MatmulConfig("c22", 64, 256, 64),
-    MatmulConfig("c23", 128, 128, 128),
-    # 小 M 场景补充（例如 decode 阶段 M=1/2/4/8/16）
-    MatmulConfig("c24", 16, 128, 128),
-    MatmulConfig("c25", 16, 64, 128),
-    MatmulConfig("c26", 16, 128, 64),
-    MatmulConfig("c27", 16, 256, 64),
-    MatmulConfig("c28", 16, 64, 64),
-    MatmulConfig("c29", 16, 256, 128),
+    MatmulConfig(f"c{idx}", bm, bn, bk)
+    for idx, (bm, bn, bk) in enumerate(_BASE_BLOCKS)
 ]
 
 
@@ -51,7 +31,10 @@ CONFIG_MAP: Dict[str, MatmulConfig] = {cfg.config_id: cfg for cfg in BASE_CONFIG
 
 
 def get_default_config() -> MatmulConfig:
-    return CONFIG_MAP["c03"]
+    for cfg in BASE_CONFIGS:
+        if (cfg.BLOCK_M, cfg.BLOCK_N, cfg.BLOCK_K) == (64, 128, 128):
+            return cfg
+    raise RuntimeError("缺少默认配置 (64,128,128)")
 
 
 def ids_to_configs(config_ids: List[str]) -> List[MatmulConfig]:

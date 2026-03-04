@@ -6,7 +6,7 @@ from typing import Any, List, Tuple
 
 @dataclass(frozen=True)
 class BenchmarkOptions:
-    prototype_count: int = 4
+    prototype_count: int = 0
     prototype_report_csv: str = ""
     tune_size: int = 64
     eval_size: int = 256
