@@ -78,6 +78,41 @@ def _sample_shape_for_bucket_key(
     return rng.choice(bucket_candidates[key])
 
 
+def _build_positions_by_key(
+    shapes: List[Shape],
+    m_split: int,
+    n_split: int,
+    k_split: int,
+) -> Dict[BucketKey, List[int]]:
+    positions_by_key: Dict[BucketKey, List[int]] = defaultdict(list)
+    for idx, (m, n, k) in enumerate(shapes):
+        key = bucket_key(m, n, k, m_split, n_split, k_split)
+        positions_by_key[key].append(idx)
+    return positions_by_key
+
+
+def _fill_missing_bucket_keys(
+    rng: random.Random,
+    out: List[Shape],
+    positions_by_key: Dict[BucketKey, List[int]],
+    bucket_candidates: Dict[BucketKey, List[Shape]],
+) -> None:
+    required_keys = sorted(bucket_candidates.keys())
+    missing = [key for key in required_keys if key not in positions_by_key]
+    for miss_key in missing:
+        donor_key = None
+        donor_count = -1
+        for key, positions in positions_by_key.items():
+            if len(positions) > 1 and len(positions) > donor_count:
+                donor_key = key
+                donor_count = len(positions)
+        if donor_key is None:
+            raise RuntimeError("BUG: 无法在不破坏已有覆盖的前提下补齐 bucket key 覆盖")
+        replace_pos = positions_by_key[donor_key].pop()
+        out[replace_pos] = _sample_shape_for_bucket_key(rng, miss_key, bucket_candidates)
+        positions_by_key[miss_key].append(replace_pos)
+
+
 def _ensure_bucket_key_coverage(
     rng: random.Random,
     shapes: List[Shape],
@@ -87,31 +122,21 @@ def _ensure_bucket_key_coverage(
     k_split: int,
 ) -> List[Shape]:
     out = list(shapes)
-    positions_by_key: Dict[BucketKey, List[int]] = defaultdict(list)
-    for idx, (m, n, k) in enumerate(out):
-        key = bucket_key(m, n, k, m_split, n_split, k_split)
-        positions_by_key[key].append(idx)
-
-    required_keys = sorted(bucket_candidates.keys())
-    missing = [key for key in required_keys if key not in positions_by_key]
-    if not missing:
+    positions_by_key = _build_positions_by_key(out, m_split, n_split, k_split)
+    if all(key in positions_by_key for key in bucket_candidates.keys()):
         return out
+    _fill_missing_bucket_keys(rng, out, positions_by_key, bucket_candidates)
+    return out
 
-    for miss_key in missing:
-        donor_key = None
-        donor_count = -1
-        for key, positions in positions_by_key.items():
-            if len(positions) > 1 and len(positions) > donor_count:
-                donor_key = key
-                donor_count = len(positions)
 
-        if donor_key is None:
-            raise RuntimeError("BUG: 无法在不破坏已有覆盖的前提下补齐 bucket key 覆盖")
-
-        replace_pos = positions_by_key[donor_key].pop()
-        out[replace_pos] = _sample_shape_for_bucket_key(rng, miss_key, bucket_candidates)
-        positions_by_key[miss_key].append(replace_pos)
-
+def _sample_base_shapes(rng: random.Random, tune_size: int) -> List[Shape]:
+    base = tune_size // len(ALL_DISTRIBUTION_KEYS)
+    rem = tune_size % len(ALL_DISTRIBUTION_KEYS)
+    out: List[Shape] = []
+    for i, key in enumerate(ALL_DISTRIBUTION_KEYS):
+        cnt = base + (1 if i < rem else 0)
+        for _ in range(cnt):
+            out.append(_sample_shape_from_distribution_key(rng, key))
     return out
 
 
@@ -128,14 +153,7 @@ def build_tune_set(
         raise RuntimeError(
             f"tune_size={tune_size} 太小，必须 >= {len(reachable_keys)} 以覆盖当前可达 key: {reachable_keys}"
         )
-    base = tune_size // len(ALL_DISTRIBUTION_KEYS)
-    rem = tune_size % len(ALL_DISTRIBUTION_KEYS)
-    out: List[Shape] = []
-    for i, key in enumerate(ALL_DISTRIBUTION_KEYS):
-        cnt = base + (1 if i < rem else 0)
-        for _ in range(cnt):
-            out.append(_sample_shape_from_distribution_key(rng, key))
-
+    out = _sample_base_shapes(rng, tune_size)
     out = _ensure_bucket_key_coverage(rng, out, bucket_candidates, m_split, n_split, k_split)
     rng.shuffle(out)
     return tuple(out)

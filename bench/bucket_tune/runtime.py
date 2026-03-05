@@ -10,25 +10,27 @@ from bench.reporting.csv_logger import reset_csv
 from .types import BenchmarkConfig, BenchmarkOptions, BenchmarkState
 
 
-def build_benchmark_config(options: BenchmarkOptions) -> BenchmarkConfig:
+def _validate_and_setup_results(options: BenchmarkOptions) -> None:
     if options.prototype_count < 0:
         raise ValueError(f"prototype-count 必须 >= 0，当前: {options.prototype_count}")
-
-    op = get_operator(options.op_name)
-    rng_tune = random.Random(options.seed + 1)
-    rng_eval = random.Random(options.seed + 2)
-    tune_set = op.make_tune_set(rng_tune, options.tune_size, options.bucket_splits)
-    eval_set = op.make_eval_set(rng_eval, options.eval_size)
-
-    eval_keys = {op.eval_key(s, options.bucket_splits) for s in eval_set}
-    tune_keys = {op.eval_key(s, options.bucket_splits) for s in tune_set}
-    if not eval_keys.issubset(tune_keys):
-        raise RuntimeError("BUG: tune key 未覆盖 eval key")
-
     if options.reset_results:
         reset_csv(options.results_csv)
     Path(options.results_csv).parent.mkdir(parents=True, exist_ok=True)
 
+
+def _build_tune_eval_sets(op, options: BenchmarkOptions):
+    rng_tune = random.Random(options.seed + 1)
+    rng_eval = random.Random(options.seed + 2)
+    tune_set = op.make_tune_set(rng_tune, options.tune_size, options.bucket_splits)
+    eval_set = op.make_eval_set(rng_eval, options.eval_size)
+    eval_keys = {op.eval_key(s, options.bucket_splits) for s in eval_set}
+    tune_keys = {op.eval_key(s, options.bucket_splits) for s in tune_set}
+    if not eval_keys.issubset(tune_keys):
+        raise RuntimeError("BUG: tune key 未覆盖 eval key")
+    return tune_set, eval_set, frozenset(eval_keys)
+
+
+def _create_evaluators(op, options: BenchmarkOptions):
     triton_evaluator = op.create_triton_evaluator(
         dtype=options.dtype,
         device="npu",
@@ -41,21 +43,29 @@ def build_benchmark_config(options: BenchmarkOptions) -> BenchmarkConfig:
         warmup=options.warmup,
         repeat=options.repeat,
     )
-    gpu = triton_evaluator.get_gpu_name()
     if triton_evaluator.device.type != "npu":
         raise RuntimeError(f"瘦身版仅支持 npu，当前 device_type={triton_evaluator.device.type}")
+    return triton_evaluator, torch_evaluator, triton_evaluator.get_gpu_name()
 
+
+def _resolve_prototype_report_csv(options: BenchmarkOptions) -> str:
     if options.prototype_report_csv:
-        prototype_report_csv = options.prototype_report_csv
-    else:
-        p = Path(options.results_csv)
-        prototype_report_csv = str(p.with_name(f"{p.stem}_prototype_best.csv"))
+        return options.prototype_report_csv
+    p = Path(options.results_csv)
+    return str(p.with_name(f"{p.stem}_prototype_best.csv"))
 
+
+def build_benchmark_config(options: BenchmarkOptions) -> BenchmarkConfig:
+    _validate_and_setup_results(options)
+    op = get_operator(options.op_name)
+    tune_set, eval_set, eval_keys = _build_tune_eval_sets(op, options)
+    triton_evaluator, torch_evaluator, gpu = _create_evaluators(op, options)
+    prototype_report_csv = _resolve_prototype_report_csv(options)
     return BenchmarkConfig(
         options=options,
         tune_set=tune_set,
         eval_set=eval_set,
-        eval_keys=frozenset(eval_keys),
+        eval_keys=eval_keys,
         triton_evaluator=triton_evaluator,
         torch_evaluator=torch_evaluator,
         gpu=gpu,

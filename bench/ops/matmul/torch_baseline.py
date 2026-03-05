@@ -173,6 +173,20 @@ class TorchMatmulEvaluator:
     def _make_notes(self, timing_note: str) -> str:
         return f"{self.get_torch_config_id()};timing={timing_note}"
 
+    def _make_single_metric(
+        self,
+        compile_time_ms: float,
+        latencies: list[float],
+        timing_note: str,
+    ) -> Dict[str, object]:
+        p50_us = _percentile(latencies, 50)
+        return EvalMetrics(
+            compile_time_ms=compile_time_ms,
+            runtime_cost_us=p50_us,
+            invalid_config=0,
+            notes=self._make_notes(timing_note),
+        ).to_dict()
+
     def _build_success_metrics(
         self,
         shapes: Sequence[Shape],
@@ -185,16 +199,8 @@ class TorchMatmulEvaluator:
             start = idx * self.repeat
             end = start + self.repeat
             latencies = step_latencies[start:end]
-            p50_us = _percentile(latencies, 50)
             compile_time_ms = compile_time_ms_first if idx == 0 else 0.0
-            out.append(
-                EvalMetrics(
-                    compile_time_ms=compile_time_ms,
-                    runtime_cost_us=p50_us,
-                    invalid_config=0,
-                    notes=self._make_notes(timing_note),
-                ).to_dict()
-            )
+            out.append(self._make_single_metric(compile_time_ms, latencies, timing_note))
         return out
 
     def _build_error_metrics(

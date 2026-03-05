@@ -16,6 +16,27 @@ import torch
 
 _CAPTURE_LOCK = threading.Lock()
 
+_OFFLINE_ANALYSE_SCRIPT = """
+import sys
+try:
+    from torch_npu import profiler  # type: ignore
+except Exception as exc:  # noqa: BLE001
+    print(f"import_failed:{type(exc).__name__}", file=sys.stderr)
+    raise SystemExit(4)
+
+prof_root = sys.argv[1]
+analyse_mod = getattr(profiler, "profiler", None)
+analyse_fn = getattr(analyse_mod, "analyse", None) if analyse_mod is not None else None
+if analyse_fn is None:
+    raise SystemExit(3)
+
+try:
+    analyse_fn(str(prof_root), export_type=profiler.ExportType.Text)
+except Exception as exc:  # noqa: BLE001
+    print(f"analyse_failed:{type(exc).__name__}:{exc}", file=sys.stderr)
+    raise SystemExit(2)
+"""
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name, "").strip().lower()
@@ -27,7 +48,6 @@ def _env_flag(name: str, default: bool = False) -> bool:
 def _finalize_profiler_note(note: str, prof_root: Path, keep_raw: bool) -> str:
     if not keep_raw:
         return note
-    # Keep this suffix semicolon-free so it stays inside `timing=...` token parsing.
     return f"{note}|raw={prof_root}"
 
 
@@ -79,6 +99,17 @@ def _parse_npu_profiler_kernel_latencies_us(prof_root: Path) -> list[float]:
     return latencies_us
 
 
+def _parse_kernel_row_step_duration(row: dict) -> tuple[int, float] | None:
+    step_raw = str(row.get("Step Id", "")).strip()
+    dur_raw = str(row.get("Duration(us)", "")).replace("\t", "").strip()
+    if not step_raw or not dur_raw:
+        return None
+    try:
+        return int(float(step_raw)), float(dur_raw)
+    except ValueError:
+        return None
+
+
 def _parse_npu_profiler_kernel_step_durations_us(prof_root: Path) -> dict[int, float]:
     kernel_files = list(prof_root.rglob("kernel_details.csv"))
     if not kernel_files:
@@ -89,16 +120,10 @@ def _parse_npu_profiler_kernel_step_durations_us(prof_root: Path) -> dict[int, f
         with kernel_file.open("r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                step_raw = str(row.get("Step Id", "")).strip()
-                dur_raw = str(row.get("Duration(us)", "")).replace("\t", "").strip()
-                if not step_raw or not dur_raw:
-                    continue
-                try:
-                    step_id = int(float(step_raw))
-                    dur = float(dur_raw)
-                except ValueError:
-                    continue
-                step_durations[step_id] += dur
+                parsed = _parse_kernel_row_step_duration(row)
+                if parsed is not None:
+                    step_id, dur = parsed
+                    step_durations[step_id] += dur
     return dict(step_durations)
 
 
@@ -124,6 +149,19 @@ def _parse_npu_profiler_stage_latencies_us(prof_root: Path) -> list[float]:
     return latencies_us
 
 
+def _parse_stage_row_step_duration(row: dict) -> tuple[int, float] | None:
+    step_raw = str(row.get("Step", "")).strip()
+    dur_raw = str(row.get("Computing", "")).strip()
+    if not dur_raw:
+        dur_raw = str(row.get("Stage", "")).strip()
+    if not step_raw or not dur_raw:
+        return None
+    try:
+        return int(float(step_raw)), float(dur_raw)
+    except ValueError:
+        return None
+
+
 def _parse_npu_profiler_stage_step_durations_us(prof_root: Path) -> dict[int, float]:
     step_files = list(prof_root.rglob("step_trace_time.csv"))
     if not step_files:
@@ -134,49 +172,25 @@ def _parse_npu_profiler_stage_step_durations_us(prof_root: Path) -> dict[int, fl
         with step_file.open("r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                step_raw = str(row.get("Step", "")).strip()
-                dur_raw = str(row.get("Computing", "")).strip()
-                if not dur_raw:
-                    dur_raw = str(row.get("Stage", "")).strip()
-                if not step_raw or not dur_raw:
-                    continue
-                try:
-                    step_id = int(float(step_raw))
-                    dur = float(dur_raw)
-                except ValueError:
-                    continue
-                step_durations[step_id] = dur
+                parsed = _parse_stage_row_step_duration(row)
+                if parsed is not None:
+                    step_id, dur = parsed
+                    step_durations[step_id] = dur
     return step_durations
 
 
-def _run_npu_profiler_offline_analyse(profiler_module, prof_root: Path) -> tuple[bool, str]:
-    _ = profiler_module
-    analyse_script = """
-import sys
-try:
-    from torch_npu import profiler  # type: ignore
-except Exception as exc:  # noqa: BLE001
-    print(f"import_failed:{type(exc).__name__}", file=sys.stderr)
-    raise SystemExit(4)
-
-prof_root = sys.argv[1]
-analyse_mod = getattr(profiler, "profiler", None)
-analyse_fn = getattr(analyse_mod, "analyse", None) if analyse_mod is not None else None
-if analyse_fn is None:
-    raise SystemExit(3)
-
-try:
-    analyse_fn(str(prof_root), export_type=profiler.ExportType.Text)
-except Exception as exc:  # noqa: BLE001
-    print(f"analyse_failed:{type(exc).__name__}:{exc}", file=sys.stderr)
-    raise SystemExit(2)
-"""
-    proc = subprocess.run(
-        [sys.executable, "-c", analyse_script, str(prof_root)],
+def _run_offline_analyse_subprocess(prof_root: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-c", _OFFLINE_ANALYSE_SCRIPT, str(prof_root)],
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _run_npu_profiler_offline_analyse(profiler_module, prof_root: Path) -> tuple[bool, str]:
+    _ = profiler_module
+    proc = _run_offline_analyse_subprocess(prof_root)
     if proc.returncode == 0:
         return True, "offline_analyse_subprocess_ok"
     if proc.returncode == 3:
@@ -187,10 +201,7 @@ except Exception as exc:  # noqa: BLE001
     return False, f"offline_analyse_subprocess_failed:{stderr}"
 
 
-def _align_step_durations_to_expected(step_durations: dict[int, float], expected_steps: int) -> list[float]:
-    if expected_steps <= 0 or not step_durations:
-        return []
-
+def _clean_step_durations(step_durations: dict[int, float]) -> dict[int, float]:
     cleaned: dict[int, float] = {}
     for step_id, dur in step_durations.items():
         try:
@@ -201,13 +212,12 @@ def _align_step_durations_to_expected(step_durations: dict[int, float], expected
         if not math.isfinite(latency) or latency < 0:
             continue
         cleaned[sid] = latency
+    return cleaned
 
-    if not cleaned:
-        return []
 
+def _find_best_step_series(cleaned: dict[int, float], expected_steps: int) -> tuple[list[float], int]:
     candidate_starts = {min(cleaned.keys()), 0, 1}
     candidate_starts.update(step_id for step_id, dur in cleaned.items() if dur > 0)
-
     best_series: list[float] = []
     best_non_zero = -1
     for start in sorted(candidate_starts):
@@ -216,14 +226,149 @@ def _align_step_durations_to_expected(step_durations: dict[int, float], expected
         if non_zero > best_non_zero:
             best_series = series
             best_non_zero = non_zero
+    return best_series, best_non_zero
 
+
+def _fallback_ordered_series(cleaned: dict[int, float], expected_steps: int) -> list[float]:
+    ordered = [float(cleaned[k]) for k in sorted(cleaned.keys())]
+    if len(ordered) >= expected_steps:
+        return ordered[:expected_steps]
+    return ordered + [0.0] * (expected_steps - len(ordered))
+
+
+def _align_step_durations_to_expected(step_durations: dict[int, float], expected_steps: int) -> list[float]:
+    if expected_steps <= 0 or not step_durations:
+        return []
+    cleaned = _clean_step_durations(step_durations)
+    if not cleaned:
+        return []
+    best_series, best_non_zero = _find_best_step_series(cleaned, expected_steps)
     if best_non_zero <= 0:
-        ordered = [float(cleaned[k]) for k in sorted(cleaned.keys())]
-        if len(ordered) >= expected_steps:
-            return ordered[:expected_steps]
-        return ordered + [0.0] * (expected_steps - len(ordered))
-
+        return _fallback_ordered_series(cleaned, expected_steps)
     return best_series
+
+
+def _run_profile_capture(prof, step_launches: list[Callable[[], None]], device: torch.device) -> None:
+    step_launches[0]()
+    synchronize(device)
+    prof.step()
+    for launch in step_launches:
+        launch()
+        synchronize(device)
+        prof.step()
+
+
+def _try_kernel_stage_step_sources(
+    prof_root: Path, active_steps: int, keep_raw: bool
+) -> tuple[list[float], str] | None:
+    kernel_step = _parse_npu_profiler_kernel_step_durations_us(prof_root)
+    if kernel_step:
+        latencies = _align_step_durations_to_expected(kernel_step, active_steps)
+        if latencies and sum(1 for x in latencies if x > 0) >= max(1, int(active_steps * 0.9)):
+            return latencies, _finalize_profiler_note("npu_profiler_batch_offline_kernel_step", prof_root, keep_raw)
+    stage_step = _parse_npu_profiler_stage_step_durations_us(prof_root)
+    if stage_step:
+        latencies = _align_step_durations_to_expected(stage_step, active_steps)
+        if latencies and sum(1 for x in latencies if x > 0) >= max(1, int(active_steps * 0.8)):
+            return latencies, _finalize_profiler_note("npu_profiler_batch_offline_step_trace_stage", prof_root, keep_raw)
+    return None
+
+
+def _try_flat_sources(
+    prof_root: Path, active_steps: int, keep_raw: bool, analyse_note: str
+) -> tuple[list[float], str]:
+    stage_flat = _parse_npu_profiler_stage_latencies_us(prof_root)
+    if len(stage_flat) >= active_steps:
+        return stage_flat[:active_steps], _finalize_profiler_note(
+            "npu_profiler_batch_offline_step_trace_flat", prof_root, keep_raw
+        )
+    flat = _parse_npu_profiler_kernel_latencies_us(prof_root)
+    if len(flat) >= active_steps:
+        return flat[:active_steps], _finalize_profiler_note("npu_profiler_batch_offline_kernel_flat", prof_root, keep_raw)
+    if flat:
+        return flat, _finalize_profiler_note("npu_profiler_batch_offline_short_kernel_flat", prof_root, keep_raw)
+    if stage_flat:
+        return stage_flat, _finalize_profiler_note(
+            "npu_profiler_batch_offline_short_step_trace_flat", prof_root, keep_raw
+        )
+    return [], _finalize_profiler_note(f"{analyse_note};npu_profiler_batch_no_csv", prof_root, keep_raw)
+
+
+def _extract_latencies_from_prof_root(
+    prof_root: Path,
+    active_steps: int,
+    keep_raw: bool,
+    analyse_note: str,
+) -> tuple[list[float], str]:
+    step_result = _try_kernel_stage_step_sources(prof_root, active_steps, keep_raw)
+    if step_result is not None:
+        return step_result
+    return _try_flat_sources(prof_root, active_steps, keep_raw, analyse_note)
+
+
+def _create_batch_profiler_config(profiler, prof_root: Path, active_steps: int):
+    activities = [profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU]
+    sched = profiler.schedule(wait=0, warmup=1, active=active_steps, repeat=1)
+    trace_cb = profiler.tensorboard_trace_handler(
+        dir_name=str(prof_root),
+        analyse_flag=False,
+        async_mode=False,
+    )
+    exp_cfg = profiler._ExperimentalConfig(export_type=profiler.ExportType.Text)
+    return activities, sched, trace_cb, exp_cfg
+
+
+def _run_profiler_capture(profiler, prof_root: Path, active_steps: int, step_launches, device):
+    activities, sched, trace_cb, exp_cfg = _create_batch_profiler_config(profiler, prof_root, active_steps)
+    with _CAPTURE_LOCK:
+        with profiler.profile(
+            activities=activities,
+            schedule=sched,
+            on_trace_ready=trace_cb,
+            experimental_config=exp_cfg,
+        ) as prof:
+            _run_profile_capture(prof, step_launches, device)
+
+
+def _run_batch_profile_and_extract(
+    profiler,
+    prof_root: Path,
+    step_launches: list[Callable[[], None]],
+    device: torch.device,
+    active_steps: int,
+    keep_raw: bool,
+) -> tuple[list[float], str]:
+    _run_profiler_capture(profiler, prof_root, active_steps, step_launches, device)
+    analysed, analyse_note = _run_npu_profiler_offline_analyse(profiler, prof_root)
+    if not analysed:
+        return [], _finalize_profiler_note(analyse_note, prof_root, keep_raw)
+    return _extract_latencies_from_prof_root(prof_root, active_steps, keep_raw, analyse_note)
+
+
+def _import_npu_profiler() -> tuple[object | None, str | None]:
+    try:
+        from torch_npu import profiler  # type: ignore
+        return profiler, None
+    except Exception as exc:  # noqa: BLE001
+        return None, f"profiler_import_failed:{type(exc).__name__}"
+
+
+def _run_batch_profile_with_cleanup(
+    profiler,
+    prof_root: Path,
+    step_launches: list[Callable[[], None]],
+    device: torch.device,
+    keep_raw: bool,
+) -> tuple[list[float], str]:
+    try:
+        return _run_batch_profile_and_extract(
+            profiler, prof_root, step_launches, device, len(step_launches), keep_raw
+        )
+    except Exception as exc:  # noqa: BLE001
+        return [], _finalize_profiler_note(f"npu_profiler_batch_failed:{type(exc).__name__}", prof_root, keep_raw)
+    finally:
+        if not keep_raw:
+            shutil.rmtree(prof_root, ignore_errors=True)
 
 
 def _profile_npu_step_launches_us_single(
@@ -235,78 +380,13 @@ def _profile_npu_step_launches_us_single(
     if not step_launches:
         return [], "npu_profiler_empty_steps"
 
-    try:
-        from torch_npu import profiler  # type: ignore
-    except Exception as exc:  # noqa: BLE001
-        return [], f"profiler_import_failed:{type(exc).__name__}"
+    profiler, err = _import_npu_profiler()
+    if profiler is None:
+        return [], err
 
-    active_steps = len(step_launches)
     prof_root = Path(tempfile.mkdtemp(prefix="npu_prof_batch_"))
     keep_raw = _env_flag("NPU_PROFILER_KEEP_RAW", default=False)
-    activities = [profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU]
-    sched = profiler.schedule(wait=0, warmup=1, active=active_steps, repeat=1)
-    trace_cb = profiler.tensorboard_trace_handler(
-        dir_name=str(prof_root),
-        analyse_flag=False,
-        async_mode=False,
-    )
-    exp_cfg = profiler._ExperimentalConfig(export_type=profiler.ExportType.Text)
-
-    try:
-        # Capture on NPU is serialized; offline analysis can run concurrently.
-        with _CAPTURE_LOCK:
-            with profiler.profile(
-                activities=activities,
-                schedule=sched,
-                on_trace_ready=trace_cb,
-                experimental_config=exp_cfg,
-            ) as prof:
-                # schedule warmup step (not counted in active steps)
-                step_launches[0]()
-                synchronize(device)
-                prof.step()
-                for launch in step_launches:
-                    launch()
-                    synchronize(device)
-                    prof.step()
-
-        analysed, analyse_note = _run_npu_profiler_offline_analyse(profiler, prof_root)
-        if not analysed:
-            return [], _finalize_profiler_note(analyse_note, prof_root, keep_raw)
-
-        kernel_step = _parse_npu_profiler_kernel_step_durations_us(prof_root)
-        if kernel_step:
-            latencies = _align_step_durations_to_expected(kernel_step, active_steps)
-            if latencies and sum(1 for x in latencies if x > 0) >= max(1, int(active_steps * 0.9)):
-                return latencies, _finalize_profiler_note("npu_profiler_batch_offline_kernel_step", prof_root, keep_raw)
-
-        stage_step = _parse_npu_profiler_stage_step_durations_us(prof_root)
-        if stage_step:
-            latencies = _align_step_durations_to_expected(stage_step, active_steps)
-            if latencies and sum(1 for x in latencies if x > 0) >= max(1, int(active_steps * 0.8)):
-                return latencies, _finalize_profiler_note("npu_profiler_batch_offline_step_trace_stage", prof_root, keep_raw)
-
-        stage_flat = _parse_npu_profiler_stage_latencies_us(prof_root)
-        if len(stage_flat) >= active_steps:
-            return stage_flat[:active_steps], _finalize_profiler_note(
-                "npu_profiler_batch_offline_step_trace_flat", prof_root, keep_raw
-            )
-
-        flat = _parse_npu_profiler_kernel_latencies_us(prof_root)
-        if len(flat) >= active_steps:
-            return flat[:active_steps], _finalize_profiler_note("npu_profiler_batch_offline_kernel_flat", prof_root, keep_raw)
-        if flat:
-            return flat, _finalize_profiler_note("npu_profiler_batch_offline_short_kernel_flat", prof_root, keep_raw)
-        if stage_flat:
-            return stage_flat, _finalize_profiler_note(
-                "npu_profiler_batch_offline_short_step_trace_flat", prof_root, keep_raw
-            )
-        return [], _finalize_profiler_note(f"{analyse_note};npu_profiler_batch_no_csv", prof_root, keep_raw)
-    except Exception as exc:  # noqa: BLE001
-        return [], _finalize_profiler_note(f"npu_profiler_batch_failed:{type(exc).__name__}", prof_root, keep_raw)
-    finally:
-        if not keep_raw:
-            shutil.rmtree(prof_root, ignore_errors=True)
+    return _run_batch_profile_with_cleanup(profiler, prof_root, step_launches, device, keep_raw)
 
 
 def profile_npu_step_launches_us(
@@ -320,20 +400,26 @@ def profile_npu_step_launches_us(
     return _profile_npu_step_launches_us_single(device, step_launches)
 
 
-def _measure_latencies_us_with_torch_npu_profiler(
-    device: torch.device,
-    repeat: int,
-    launch: Callable[[], None],
-) -> tuple[list[float], str]:
-    try:
-        from torch_npu import profiler  # type: ignore
-    except Exception as exc:  # noqa: BLE001
-        return [], f"profiler_import_failed:{type(exc).__name__}"
+def _run_measure_profile_capture(prof, repeat: int, launch: Callable[[], None], device: torch.device) -> None:
+    for _ in range(repeat + 1):
+        launch()
+        synchronize(device)
+        prof.step()
 
-    prof_root = Path(tempfile.mkdtemp(prefix="npu_prof_eval_"))
-    keep_raw = _env_flag("NPU_PROFILER_KEEP_RAW", default=False)
+
+def _extract_measure_latencies(prof_root: Path, keep_raw: bool, analyse_note: str) -> tuple[list[float], str]:
+    latencies = _parse_npu_profiler_kernel_latencies_us(prof_root)
+    if latencies:
+        return latencies, _finalize_profiler_note("npu_profiler_offline_kernel_details", prof_root, keep_raw)
+
+    stage_latencies = _parse_npu_profiler_stage_latencies_us(prof_root)
+    if stage_latencies:
+        return stage_latencies, _finalize_profiler_note("npu_profiler_offline_step_trace_stage", prof_root, keep_raw)
+    return [], _finalize_profiler_note(f"{analyse_note};npu_profiler_no_csv", prof_root, keep_raw)
+
+
+def _create_measure_profiler_config(profiler, prof_root: Path, repeat: int):
     activities = [profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU]
-    # Use one warmup step inside schedule to avoid profile() warmup warning.
     sched = profiler.schedule(wait=0, warmup=1, active=repeat, repeat=1)
     trace_cb = profiler.tensorboard_trace_handler(
         dir_name=str(prof_root),
@@ -341,37 +427,66 @@ def _measure_latencies_us_with_torch_npu_profiler(
         async_mode=False,
     )
     exp_cfg = profiler._ExperimentalConfig(export_type=profiler.ExportType.Text)
+    return activities, sched, trace_cb, exp_cfg
 
+
+def _run_measure_profile_capture_block(profiler, prof_root: Path, repeat: int, launch, device):
+    activities, sched, trace_cb, exp_cfg = _create_measure_profiler_config(profiler, prof_root, repeat)
+    with _CAPTURE_LOCK:
+        with profiler.profile(
+            activities=activities,
+            schedule=sched,
+            on_trace_ready=trace_cb,
+            experimental_config=exp_cfg,
+        ) as prof:
+            _run_measure_profile_capture(prof, repeat, launch, device)
+
+
+def _run_measure_profile_and_extract(
+    profiler,
+    prof_root: Path,
+    repeat: int,
+    launch: Callable[[], None],
+    device: torch.device,
+    keep_raw: bool,
+) -> tuple[list[float], str]:
+    _run_measure_profile_capture_block(profiler, prof_root, repeat, launch, device)
+    analysed, analyse_note = _run_npu_profiler_offline_analyse(profiler, prof_root)
+    if not analysed:
+        return [], _finalize_profiler_note(analyse_note, prof_root, keep_raw)
+    return _extract_measure_latencies(prof_root, keep_raw, analyse_note)
+
+
+def _run_measure_with_cleanup(
+    profiler,
+    prof_root: Path,
+    repeat: int,
+    launch: Callable[[], None],
+    device: torch.device,
+    keep_raw: bool,
+) -> tuple[list[float], str]:
     try:
-        # Capture on NPU is serialized; offline analysis can run concurrently.
-        with _CAPTURE_LOCK:
-            with profiler.profile(
-                activities=activities,
-                schedule=sched,
-                on_trace_ready=trace_cb,
-                experimental_config=exp_cfg,
-            ) as prof:
-                for _ in range(repeat + 1):
-                    launch()
-                    synchronize(device)
-                    prof.step()
-
-        analysed, analyse_note = _run_npu_profiler_offline_analyse(profiler, prof_root)
-        if not analysed:
-            return [], _finalize_profiler_note(analyse_note, prof_root, keep_raw)
-        latencies = _parse_npu_profiler_kernel_latencies_us(prof_root)
-        if latencies:
-            return latencies, _finalize_profiler_note("npu_profiler_offline_kernel_details", prof_root, keep_raw)
-
-        stage_latencies = _parse_npu_profiler_stage_latencies_us(prof_root)
-        if stage_latencies:
-            return stage_latencies, _finalize_profiler_note("npu_profiler_offline_step_trace_stage", prof_root, keep_raw)
-        return [], _finalize_profiler_note(f"{analyse_note};npu_profiler_no_csv", prof_root, keep_raw)
+        return _run_measure_profile_and_extract(
+            profiler, prof_root, repeat, launch, device, keep_raw
+        )
     except Exception as exc:  # noqa: BLE001
         return [], _finalize_profiler_note(f"npu_profiler_failed:{type(exc).__name__}", prof_root, keep_raw)
     finally:
         if not keep_raw:
             shutil.rmtree(prof_root, ignore_errors=True)
+
+
+def _measure_latencies_us_with_torch_npu_profiler(
+    device: torch.device,
+    repeat: int,
+    launch: Callable[[], None],
+) -> tuple[list[float], str]:
+    profiler, err = _import_npu_profiler()
+    if profiler is None:
+        return [], err
+    prof_root = Path(tempfile.mkdtemp(prefix="npu_prof_eval_"))
+    keep_raw = _env_flag("NPU_PROFILER_KEEP_RAW", default=False)
+    return _run_measure_with_cleanup(profiler, prof_root, repeat, launch, device, keep_raw)
 
 
 def measure_latencies_us(
@@ -392,12 +507,7 @@ def measure_latencies_us(
     raise RuntimeError(f"npu profiler timing unavailable: {prof_note}")
 
 
-def align_ascend_toolchain_env() -> str:
-    """Align bishengir-compile and bisheng to the same Ascend toolkit tree."""
-    bishengir = shutil.which("bishengir-compile")
-    if not bishengir:
-        return "missing_bishengir_compile"
-
+def _find_ascend_toolkit_root(bishengir: str) -> tuple[Path | None, Path | None, Path | None]:
     raw_path = Path(bishengir)
     candidate_roots = [raw_path.parent.parent, raw_path.resolve().parent.parent]
     toolkit_root = None
@@ -411,15 +521,10 @@ def align_ascend_toolchain_env() -> str:
             ccec_bin = this_ccec_bin
             bin_dir = this_bin_dir
             break
+    return toolkit_root, ccec_bin, bin_dir
 
-    if toolkit_root is None or ccec_bin is None or bin_dir is None:
-        return "toolchain_root_not_found"
 
-    updates: list[str] = []
-
-    preferred = [str(ccec_bin), str(bin_dir)]
-    old_entries = [x for x in os.environ.get("PATH", "").split(os.pathsep) if x]
-
+def _reorder_path_with_preferred(preferred: list[str], old_entries: list[str]) -> tuple[list[str], bool]:
     preferred_norm = {str(Path(x).resolve()) for x in preferred}
     rest = []
     for entry in old_entries:
@@ -430,18 +535,41 @@ def align_ascend_toolchain_env() -> str:
         if entry_norm in preferred_norm:
             continue
         rest.append(entry)
-
     new_entries = preferred + rest
-    old_path = os.environ.get("PATH", "")
     new_path = os.pathsep.join(new_entries)
-    if new_path != old_path:
-        os.environ["PATH"] = new_path
-        updates.append("path_reordered")
+    old_path = os.environ.get("PATH", "")
+    return new_entries, new_path != old_path
 
+
+def _build_path_updates(toolkit_root: Path, ccec_bin: Path, bin_dir: Path) -> list[str]:
+    updates: list[str] = []
+    preferred = [str(ccec_bin), str(bin_dir)]
+    old_entries = [x for x in os.environ.get("PATH", "").split(os.pathsep) if x]
+    new_entries, path_changed = _reorder_path_with_preferred(preferred, old_entries)
+    if path_changed:
+        os.environ["PATH"] = os.pathsep.join(new_entries)
+        updates.append("path_reordered")
+    return updates
+
+
+def _apply_toolkit_env_updates(toolkit_root: Path, updates: list[str]) -> list[str]:
     for key in ("ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME"):
         cur = os.environ.get(key, "")
         if cur != str(toolkit_root):
             os.environ[key] = str(toolkit_root)
             updates.append(f"{key}_set")
+    return updates
 
+
+def align_ascend_toolchain_env() -> str:
+    bishengir = shutil.which("bishengir-compile")
+    if not bishengir:
+        return "missing_bishengir_compile"
+
+    toolkit_root, ccec_bin, bin_dir = _find_ascend_toolkit_root(bishengir)
+    if toolkit_root is None or ccec_bin is None or bin_dir is None:
+        return "toolchain_root_not_found"
+
+    updates = _build_path_updates(toolkit_root, ccec_bin, bin_dir)
+    updates = _apply_toolkit_env_updates(toolkit_root, updates)
     return ",".join(updates) if updates else "no_change"

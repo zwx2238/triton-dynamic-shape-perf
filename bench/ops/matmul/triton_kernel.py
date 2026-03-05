@@ -117,6 +117,14 @@ def _percentile(values: list[float], pct: float) -> float:
     return ordered[lo] * (1.0 - frac) + ordered[hi] * frac
 
 
+def _resolve_ascend_num_cores(device) -> int:
+    default_cores = 20
+    device_name_hint = str(get_device_name(device))
+    if "910B2" in device_name_hint:
+        default_cores = 24
+    return int(os.environ.get("TRITON_ASCEND_NUM_CORES", str(default_cores)))
+
+
 class TritonMatmulEvaluator:
     def __init__(
         self,
@@ -131,15 +139,9 @@ class TritonMatmulEvaluator:
         self.warmup = int(warmup)
         self.repeat = int(repeat)
         self.env_notes = ""
-        default_cores = 20
-        device_name_hint = str(get_device_name(self.device))
-        if "910B2" in device_name_hint:
-            default_cores = 24
-        self.ascend_num_cores = int(os.environ.get("TRITON_ASCEND_NUM_CORES", str(default_cores)))
+        self.ascend_num_cores = _resolve_ascend_num_cores(self.device)
         self.ascend_swizzle_group = 4
-
         self.env_notes = align_ascend_toolchain_env()
-
         self.compile_cache: set[tuple[str, str, str]] = set()
         self._cached_shape: Optional[Shape] = None
         self._cached_tensors: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None
@@ -180,30 +182,23 @@ class TritonMatmulEvaluator:
         self._cached_tensors = (a, b, c)
         return a, b, c
 
+    def _launch_params(self, M: int, N: int, cfg: MatmulConfig) -> tuple[int, int]:
+        total_blocks = triton.cdiv(M, cfg.BLOCK_M) * triton.cdiv(N, cfg.BLOCK_N)
+        launch_programs = max(1, min(self.ascend_num_cores, total_blocks))
+        swizzle_direction = 1 if M < N else 0
+        return launch_programs, swizzle_direction
+
     def _launch(self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, cfg: MatmulConfig) -> None:
         M, K = a.shape
         _, N = b.shape
-
-        total_blocks = triton.cdiv(M, cfg.BLOCK_M) * triton.cdiv(N, cfg.BLOCK_N)
-        launch_programs = max(1, min(self.ascend_num_cores, total_blocks))
+        launch_programs, swizzle_direction = self._launch_params(M, N, cfg)
         swizzle_group = self.ascend_swizzle_group
-        swizzle_direction = 1 if M < N else 0
-
         grid = (launch_programs,)
-
         _matmul_kernel[grid](
-            a,
-            b,
-            c,
-            M,
-            N,
-            K,
-            a.stride(0),
-            a.stride(1),
-            b.stride(0),
-            b.stride(1),
-            c.stride(0),
-            c.stride(1),
+            a, b, c, M, N, K,
+            a.stride(0), a.stride(1),
+            b.stride(0), b.stride(1),
+            c.stride(0), c.stride(1),
             BLOCK_M=cfg.BLOCK_M,
             BLOCK_N=cfg.BLOCK_N,
             BLOCK_K=cfg.BLOCK_K,
@@ -301,6 +296,22 @@ class TritonMatmulEvaluator:
         note_parts.append(f"timing={timing_note}")
         return ";".join(note_parts)
 
+    def _make_single_metric(
+        self,
+        shape: Shape,
+        cfg: MatmulConfig,
+        compile_time_ms: float,
+        latencies: list[float],
+        timing_note: str,
+    ) -> Dict[str, object]:
+        p50_us = _percentile(latencies, 50)
+        return EvalMetrics(
+            compile_time_ms=compile_time_ms,
+            runtime_cost_us=p50_us,
+            invalid_config=0,
+            notes=self._make_notes(shape, cfg, timing_note),
+        ).to_dict()
+
     def _build_success_metrics(
         self,
         entries: Sequence[tuple[Shape, MatmulConfig]],
@@ -313,14 +324,10 @@ class TritonMatmulEvaluator:
             start = idx * self.repeat
             end = start + self.repeat
             latencies = step_latencies[start:end]
-            p50_us = _percentile(latencies, 50)
             out.append(
-                EvalMetrics(
-                    compile_time_ms=compile_time_by_index[idx],
-                    runtime_cost_us=p50_us,
-                    invalid_config=0,
-                    notes=self._make_notes(shape, cfg, timing_note),
-                ).to_dict()
+                self._make_single_metric(
+                    shape, cfg, compile_time_by_index[idx], latencies, timing_note
+                )
             )
         return out
 

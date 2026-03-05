@@ -62,6 +62,33 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _get_all_bucket_keys(op) -> list:
+    if not hasattr(op, "all_bucket_keys"):
+        return []
+    try:
+        return sorted(int(k) for k in op.all_bucket_keys())
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _compute_bucket_key_info(
+    benchmark_config: BenchmarkConfig, options: BenchmarkOptions, tmp_results_csv: Path
+) -> tuple[list, list, list, str]:
+    op = benchmark_config.op
+    splits = options.bucket_splits
+    reachable_keys = sorted({int(op.eval_key(shape, splits)) for shape in benchmark_config.tune_set})
+    eval_keys = sorted({int(op.eval_key(shape, splits)) for shape in benchmark_config.eval_set})
+    all_keys = _get_all_bucket_keys(op)
+    unreachable_keys = [k for k in all_keys if k not in set(reachable_keys)]
+    detail = (
+        f"results_csv={tmp_results_csv},"
+        f"reachable_keys={reachable_keys},"
+        f"unreachable_keys={unreachable_keys},"
+        f"eval_keys={eval_keys}"
+    )
+    return reachable_keys, unreachable_keys, eval_keys, detail
+
+
 class Pipeline:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -90,12 +117,8 @@ class Pipeline:
             self.logger.info("stage_detail stage=%s %s", stage, detail)
         self.stage_elapsed_sec.append((stage, elapsed))
 
-    def run(self) -> None:
+    def _log_pipeline_start(self) -> None:
         args = self.args
-        if int(args.prototype_count) < 0:
-            raise ValueError(f"要求 --prototype-count >= 0（当前: {args.prototype_count}）")
-        pipeline_t0 = time.time()
-
         self.logger.info("run_dir=%s", self.run_dir)
         self.logger.info("op=%s", args.op)
         self.logger.info(
@@ -109,128 +132,152 @@ class Pipeline:
             args.bucket_splits,
         )
 
-        with tempfile.TemporaryDirectory(prefix="bucket_tune_pipeline_") as tmp_dir:
-            tmp_dir_path = Path(tmp_dir)
-            tmp_results_csv = tmp_dir_path / "bucket_torch.csv"
-            tmp_proto_report_csv = tmp_dir_path / "prototype_best.csv"
-            options = BenchmarkOptions(
-                prototype_count=int(args.prototype_count),
-                prototype_report_csv=str(tmp_proto_report_csv),
-                tune_size=int(args.tune_size),
-                eval_size=int(args.eval_size),
-                seed=int(args.seed),
-                op_name=str(args.op),
-                dtype=str(args.dtype),
-                warmup=int(args.warmup),
-                repeat=int(args.repeat),
-                bucket_splits=tuple(args.bucket_splits),
-                results_csv=str(tmp_results_csv),
-                reset_results=True,
-            )
-            benchmark_config: Optional[BenchmarkConfig] = None
-            benchmark_state: Optional[BenchmarkState] = None
-            torch_pool = cf.ThreadPoolExecutor(max_workers=1)
-            torch_future: Optional[cf.Future[tuple[str, list[dict[str, object]]]]] = None
-            torch_launch_t0 = 0.0
+    def _build_options(self, tmp_dir_path: Path) -> BenchmarkOptions:
+        args = self.args
+        tmp_results_csv = tmp_dir_path / "bucket_torch.csv"
+        tmp_proto_report_csv = tmp_dir_path / "prototype_best.csv"
+        return BenchmarkOptions(
+            prototype_count=int(args.prototype_count),
+            prototype_report_csv=str(tmp_proto_report_csv),
+            tune_size=int(args.tune_size),
+            eval_size=int(args.eval_size),
+            seed=int(args.seed),
+            op_name=str(args.op),
+            dtype=str(args.dtype),
+            warmup=int(args.warmup),
+            repeat=int(args.repeat),
+            bucket_splits=tuple(args.bucket_splits),
+            results_csv=str(tmp_results_csv),
+            reset_results=True,
+        )
 
-            def require_context() -> tuple[BenchmarkConfig, BenchmarkState]:
-                if benchmark_config is None or benchmark_state is None:
-                    raise RuntimeError("benchmark 尚未初始化")
-                return benchmark_config, benchmark_state
+    def _init_benchmark_context(
+        self, options: BenchmarkOptions, ctx: dict
+    ) -> tuple[BenchmarkConfig, BenchmarkState]:
+        benchmark_config = build_benchmark_config(options)
+        benchmark_state = build_benchmark_state(options.op_name)
+        ctx["benchmark_config"] = benchmark_config
+        ctx["benchmark_state"] = benchmark_state
+        return benchmark_config, benchmark_state
 
-            def setup_benchmark_stage() -> str:
-                nonlocal benchmark_config
-                nonlocal benchmark_state
-                benchmark_config = build_benchmark_config(options)
-                benchmark_state = build_benchmark_state(options.op_name)
-                op = benchmark_config.op
-                splits = options.bucket_splits
-                reachable_keys = sorted({int(op.eval_key(shape, splits)) for shape in benchmark_config.tune_set})
-                eval_keys = sorted({int(op.eval_key(shape, splits)) for shape in benchmark_config.eval_set})
-                all_keys = []
-                if hasattr(op, "all_bucket_keys"):
-                    try:
-                        all_keys = sorted(int(k) for k in op.all_bucket_keys())
-                    except Exception:  # noqa: BLE001
-                        all_keys = []
-                unreachable_keys = [k for k in all_keys if k not in set(reachable_keys)]
-                self.logger.info(
-                    "bucket_key_info splits=%s reachable=%s unreachable=%s eval=%s",
-                    list(splits),
-                    reachable_keys,
-                    unreachable_keys,
-                    eval_keys,
-                )
-                return (
-                    f"results_csv={tmp_results_csv},"
-                    f"reachable_keys={reachable_keys},"
-                    f"unreachable_keys={unreachable_keys},"
-                    f"eval_keys={eval_keys}"
-                )
+    def _run_setup_benchmark_stage(
+        self,
+        options: BenchmarkOptions,
+        tmp_results_csv: Path,
+        ctx: dict,
+    ) -> str:
+        benchmark_config, _ = self._init_benchmark_context(options, ctx)
+        reachable, unreachable, eval_k, detail = _compute_bucket_key_info(
+            benchmark_config, options, tmp_results_csv
+        )
+        self.logger.info(
+            "bucket_key_info splits=%s reachable=%s unreachable=%s eval=%s",
+            list(options.bucket_splits),
+            reachable,
+            unreachable,
+            eval_k,
+        )
+        return detail
 
-            def prototype_stage() -> str:
-                config, state = require_context()
-                detail = run_prototype(config, state)
-                candidate_ids = ",".join(getattr(cfg, "config_id", "?") for cfg in state.candidates)
-                self.logger.info("prototype_candidate_ids=%s", candidate_ids)
-                return detail
+    def _require_context(self, ctx: dict) -> tuple[BenchmarkConfig, BenchmarkState]:
+        cfg, state = ctx["benchmark_config"], ctx["benchmark_state"]
+        if cfg is None or state is None:
+            raise RuntimeError("benchmark 尚未初始化")
+        return cfg, state
 
-            def bucket_stage() -> str:
-                config, state = require_context()
-                return run_bucket(config, state)
+    def _stage_prototype(self, ctx: dict) -> str:
+        config, state = self._require_context(ctx)
+        detail = run_prototype(config, state)
+        candidate_ids = ",".join(getattr(cfg, "config_id", "?") for cfg in state.candidates)
+        self.logger.info("prototype_candidate_ids=%s", candidate_ids)
+        return detail
 
-            def torch_stage() -> str:
-                nonlocal torch_future
-                nonlocal torch_launch_t0
-                config, state = require_context()
-                if torch_future is not None:
-                    detail, rows = torch_future.result()
-                    append_records(config.options.results_csv, rows)
-                    async_wall_sec = int(time.time() - torch_launch_t0)
-                    return f"{detail},async_capture=1,async_wall_sec={async_wall_sec}"
-                return run_torch(config, state)
+    def _stage_torch(self, ctx: dict) -> str:
+        config, state = self._require_context(ctx)
+        torch_future = ctx["torch_future"]
+        if torch_future is not None:
+            detail, rows = torch_future.result()
+            append_records(config.options.results_csv, rows)
+            async_wall_sec = int(time.time() - ctx["torch_launch_t0"])
+            return f"{detail},async_capture=1,async_wall_sec={async_wall_sec}"
+        return run_torch(config, state)
 
-            def full_stage() -> str:
-                config, state = require_context()
-                return run_full(config, state)
+    def _stage_case_compare(self, tmp_results_csv: Path) -> str:
+        out_csv, rows = compare_case_runtime(
+            tmp_results_csv,
+            split="eval",
+            out_csv=self.case_compare_csv,
+            allow_mixed_metric=False,
+            print_table=True,
+        )
+        return f"case_compare_csv={out_csv},rows={rows}"
 
-            def case_compare_stage() -> str:
-                out_csv, rows = compare_case_runtime(
-                    tmp_results_csv,
-                    split="eval",
-                    out_csv=self.case_compare_csv,
-                    allow_mixed_metric=False,
-                    print_table=True,
-                )
-                return f"case_compare_csv={out_csv},rows={rows}"
+    def _run_prototype_if_needed(self, ctx: dict) -> None:
+        if int(self.args.prototype_count) > 0:
+            self.run_stage("prototype", lambda: self._stage_prototype(ctx))
+        else:
+            self.logger.info("SKIP stage=prototype reason=prototype_count=0 (no config filtering)")
 
-            try:
-                self.run_stage("setup_benchmark", setup_benchmark_stage)
-                config, state = require_context()
-                torch_launch_t0 = time.time()
-                torch_future = torch_pool.submit(collect_torch_rows, config, state)
-                self.logger.info("START async_stage=benchmark_torch_capture")
-                if int(args.prototype_count) > 0:
-                    self.run_stage("prototype", prototype_stage)
-                else:
-                    self.logger.info("SKIP stage=prototype reason=prototype_count=0 (no config filtering)")
-                self.run_stage("benchmark_bucket", bucket_stage)
-                self.run_stage("benchmark_full", full_stage)
-                self.run_stage("benchmark_torch", torch_stage)
-                self.run_stage("case_compare", case_compare_stage)
-            finally:
-                torch_pool.shutdown(wait=False, cancel_futures=False)
+    def _execute_stage_sequence(
+        self,
+        options: BenchmarkOptions,
+        tmp_results_csv: Path,
+        ctx: dict,
+        torch_pool: cf.ThreadPoolExecutor,
+    ) -> None:
+        self.run_stage("setup_benchmark", lambda: self._run_setup_benchmark_stage(options, tmp_results_csv, ctx))
+        config, state = self._require_context(ctx)
+        ctx["torch_launch_t0"] = time.time()
+        ctx["torch_future"] = torch_pool.submit(collect_torch_rows, config, state)
+        self.logger.info("START async_stage=benchmark_torch_capture")
+        self._run_prototype_if_needed(ctx)
+        self.run_stage("benchmark_bucket", lambda: run_bucket(*self._require_context(ctx)))
+        self.run_stage("benchmark_full", lambda: run_full(*self._require_context(ctx)))
+        self.run_stage("benchmark_torch", lambda: self._stage_torch(ctx))
+        self.run_stage("case_compare", lambda: self._stage_case_compare(tmp_results_csv))
 
+    def _run_pipeline_stages(
+        self,
+        options: BenchmarkOptions,
+        tmp_results_csv: Path,
+    ) -> None:
+        ctx: dict = {
+            "benchmark_config": None,
+            "benchmark_state": None,
+            "torch_future": None,
+            "torch_launch_t0": 0.0,
+        }
+        torch_pool = cf.ThreadPoolExecutor(max_workers=1)
+        try:
+            self._execute_stage_sequence(options, tmp_results_csv, ctx, torch_pool)
+        finally:
+            torch_pool.shutdown(wait=False, cancel_futures=False)
+
+    def _log_pipeline_end(self, pipeline_t0: float) -> None:
         total_elapsed_sec = int(time.time() - pipeline_t0)
         self.logger.info(
             "stage_elapsed_sec=%s",
             ",".join(f"{name}:{sec}" for name, sec in self.stage_elapsed_sec),
         )
         self.logger.info("TOTAL elapsed_sec=%s", total_elapsed_sec)
-
         self.logger.info("DONE")
         self.logger.info("outputs:")
         self.logger.info("  - %s", self.case_compare_csv)
+
+    def run(self) -> None:
+        args = self.args
+        if int(args.prototype_count) < 0:
+            raise ValueError(f"要求 --prototype-count >= 0（当前: {args.prototype_count}）")
+        pipeline_t0 = time.time()
+        self._log_pipeline_start()
+
+        with tempfile.TemporaryDirectory(prefix="bucket_tune_pipeline_") as tmp_dir:
+            tmp_dir_path = Path(tmp_dir)
+            tmp_results_csv = tmp_dir_path / "bucket_torch.csv"
+            options = self._build_options(tmp_dir_path)
+            self._run_pipeline_stages(options, tmp_results_csv)
+
+        self._log_pipeline_end(pipeline_t0)
 
 
 def main() -> None:
