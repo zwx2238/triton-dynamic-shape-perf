@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .configs import MatmulConfig
-from bench.policies.common import measure_candidates_batch, select_best_candidate
+from bench.policies.common import _metrics_score, measure_candidates_batch, select_best_candidate
 
 Shape = Tuple[int, int, int]
 
@@ -138,7 +138,7 @@ def _build_eval_from_cache(
 def _make_report_row(shape: Shape, cfg: MatmulConfig, metrics: Dict[str, object]) -> Dict[str, object]:
     runtime_us = float(metrics.get("runtime_cost_us", 0.0))
     invalid = int(metrics.get("invalid_config", 0))
-    score = runtime_us if invalid == 0 and runtime_us > 0.0 else float("inf")
+    score = _metrics_score(metrics)
     return {
         "shape": f"{shape[0]}x{shape[1]}x{shape[2]}",
         "picked_config_id": cfg.config_id,

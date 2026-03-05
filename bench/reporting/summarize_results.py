@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import csv
-import math
 import statistics
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
+
+from bench.reporting._common import fmt as _fmt, geometric_mean as _geometric_mean, shape_sort_key as _shape_sort_key, print_section as _print_section
 
 
 def _to_float(row: Dict[str, str], key: str, default: float = 0.0) -> float:
@@ -28,17 +29,6 @@ def _to_int(row: Dict[str, str], key: str, default: int = 0) -> int:
         return default
 
 
-def _fmt(value: float) -> str:
-    return f"{value:.6f}"
-
-
-def _geometric_mean(values: Iterable[float]) -> float:
-    vals = [v for v in values if v > 0]
-    if not vals:
-        return 0.0
-    return math.exp(statistics.fmean(math.log(v) for v in vals))
-
-
 def _write_csv(path: Path, fieldnames: List[str], rows: Iterable[Dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -46,35 +36,6 @@ def _write_csv(path: Path, fieldnames: List[str], rows: Iterable[Dict[str, objec
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
-
-
-def _shape_sort_key(shape_id: str) -> Tuple[int, str]:
-    if not shape_id:
-        return (10**9, "")
-    tail = shape_id.split("_")[-1]
-    if tail.isdigit():
-        return (int(tail), shape_id)
-    return (10**9, shape_id)
-
-
-def _print_section(title: str, rows: List[Dict[str, object]], headers: List[str]) -> None:
-    print(f"\n=== {title} ===")
-    if not rows:
-        print("(empty)")
-        return
-
-    widths: Dict[str, int] = {}
-    for h in headers:
-        widths[h] = len(h)
-    for row in rows:
-        for h in headers:
-            widths[h] = max(widths[h], len(str(row.get(h, ""))))
-
-    line = "  ".join(h.ljust(widths[h]) for h in headers)
-    print(line)
-    print("  ".join("-" * widths[h] for h in headers))
-    for row in rows:
-        print("  ".join(str(row.get(h, "")).ljust(widths[h]) for h in headers))
 
 
 def _load_case_compare_rows(compare_csv: Path) -> List[Dict[str, str]] | None:
