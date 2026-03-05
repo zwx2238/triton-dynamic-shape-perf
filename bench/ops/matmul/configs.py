@@ -18,7 +18,9 @@ _BASE_BLOCKS: List[tuple[int, int, int]] = [
     (64, 128, 128),
     (64, 256, 64),
     (64, 128, 256),
+    (32, 32, 1024),
     (64, 64, 512),
+    (64, 64, 256),
 ]
 
 BASE_CONFIGS: List[MatmulConfig] = [
