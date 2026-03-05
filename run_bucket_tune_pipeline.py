@@ -18,6 +18,7 @@ from bench.reporting.compare_case_runtime import compare_case_runtime
 from bench.reporting.csv_logger import append_records
 from bench.reporting.summarize_results import summarize
 from bench.stages.bucket_stage import run_bucket
+from bench.stages.full_stage import run_full
 from bench.stages.prototype_stage import run_prototype
 from bench.stages.torch_stage import collect_torch_rows, run_torch
 
@@ -228,6 +229,10 @@ class Pipeline:
                 return f"{detail},async_capture=1,async_wall_sec={async_wall_sec}"
             return run_torch(config, state)
 
+        def full_stage() -> str:
+            config, state = require_context()
+            return run_full(config, state)
+
         def case_compare_stage() -> str:
             out_csv, rows = compare_case_runtime(
                 self.main_results_csv,
@@ -257,6 +262,7 @@ class Pipeline:
             else:
                 self.logger.info("SKIP stage=prototype reason=prototype_count=0 (no config filtering)")
             self.run_stage("benchmark_bucket", bucket_stage)
+            self.run_stage("benchmark_full", full_stage)
             self.run_stage("benchmark_torch", torch_stage)
             self.run_stage("case_compare", case_compare_stage)
             self.run_stage("summary", summary_stage)

@@ -3,7 +3,12 @@ from __future__ import annotations
 import time
 from typing import Callable, Dict, Generic, Hashable, Optional, Sequence, TypeVar
 
-from bench.policies.common import BatchEvaluatorFn, SelectionResult, autotune_best
+from bench.policies.common import (
+    BatchEvaluatorFn,
+    SelectionResult,
+    measure_candidates_batch,
+    select_best_candidate,
+)
 
 WorkloadT = TypeVar("WorkloadT")
 CandidateT = TypeVar("CandidateT")
@@ -41,13 +46,15 @@ class BucketTunePolicy(Generic[WorkloadT, CandidateT, BucketKeyT]):
             )
 
         t0 = time.perf_counter()
-        best_cfg, best_metrics, notes = autotune_best(
+        metrics_seq = measure_candidates_batch(
             workload,
             self.candidates,
             batch_evaluator,
         )
+        best_cfg, best_metrics = select_best_candidate(self.candidates, metrics_seq)
         tune_time_ms = (time.perf_counter() - t0) * 1000.0
         premeasure = dict(best_metrics)
+        notes = "batch_measure_then_select"
         self.cache[key] = SelectionResult(
             config=best_cfg,
             cache_key=key_str,

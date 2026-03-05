@@ -50,7 +50,7 @@ def _format_shape(row: Dict[str, str]) -> str:
 
 
 def _format_config_desc(method: str, row: Dict[str, str]) -> str:
-    if method == "BUCKET":
+    if method in {"BUCKET", "FULL"}:
         cfg_id = str(row.get("config_id", "")).strip()
         bm = str(row.get("BLOCK_M", "")).strip()
         bn = str(row.get("BLOCK_N", "")).strip()
@@ -98,7 +98,13 @@ def compare_case_runtime(
     if not filtered:
         raise RuntimeError(f"在 split={split} 下没有数据")
 
-    methods = ["TORCH", "BUCKET"]
+    known_methods = ["TORCH", "BUCKET", "FULL"]
+    present_methods = {str(r.get("method", "")) for r in filtered}
+    methods = [m for m in known_methods if m in present_methods]
+    if "TORCH" not in methods:
+        raise RuntimeError("compare_case_runtime 失败: 缺少 TORCH 基线数据")
+    if len(methods) < 2:
+        raise RuntimeError(f"compare_case_runtime 失败: 可比较方法不足，present={sorted(present_methods)}")
 
     timing_by_method_split: Dict[Tuple[str, str], set[str]] = {}
     for row in rows:
@@ -161,6 +167,9 @@ def compare_case_runtime(
     invalid_cols = [f"invalid_config_{m}" for m in methods]
     timing_cols = [f"timing_source_{m}" for m in methods]
     speedup_cols: List[str] = [f"speedup_{m}_vs_TORCH" for m in target_methods]
+    cross_speedup_cols: List[str] = []
+    if "BUCKET" in methods and "FULL" in methods:
+        cross_speedup_cols.append("speedup_BUCKET_vs_FULL")
 
     out_rows = list(table.values())
     for row in out_rows:
@@ -173,6 +182,14 @@ def compare_case_runtime(
                 row[speedup_col] = f"{base_torch / cur:.6f}"
             else:
                 row[speedup_col] = ""
+        if "speedup_BUCKET_vs_FULL" in cross_speedup_cols:
+            runtime_bucket = _to_float(row.get("runtime_cost_us_BUCKET", ""))
+            runtime_full = _to_float(row.get("runtime_cost_us_FULL", ""))
+            if runtime_bucket > 0 and runtime_full > 0:
+                # FULL is baseline here: speedup of bucket over full = runtime_full / runtime_bucket.
+                row["speedup_BUCKET_vs_FULL"] = f"{runtime_full / runtime_bucket:.6f}"
+            else:
+                row["speedup_BUCKET_vs_FULL"] = ""
 
     out_rows.sort(key=lambda r: _shape_sort_key(r.get("shape_id", "")))
 
@@ -184,6 +201,7 @@ def compare_case_runtime(
         *invalid_cols,
         *timing_cols,
         *speedup_cols,
+        *cross_speedup_cols,
     ]
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .configs import MatmulConfig
-from bench.policies.common import autotune_best
+from bench.policies.common import measure_candidates_batch, select_best_candidate
 
 Shape = Tuple[int, int, int]
 
@@ -121,7 +121,8 @@ def derive_candidate_pool_from_typical_shapes(
     report_rows: List[Dict[str, object]] = []
 
     for shape in typical_shapes:
-        cfg, metrics, _ = autotune_best(shape, candidates, eval_for_shape)
+        metrics_seq = measure_candidates_batch(shape, candidates, eval_for_shape)
+        cfg, metrics = select_best_candidate(candidates, metrics_seq)
         runtime_us = float(metrics.get("runtime_cost_us", 0.0))
         invalid = int(metrics.get("invalid_config", 0))
         score = runtime_us if invalid == 0 and runtime_us > 0.0 else float("inf")

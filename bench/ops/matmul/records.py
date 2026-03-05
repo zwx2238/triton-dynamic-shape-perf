@@ -19,7 +19,11 @@ def make_bucket_record(
     shape: Shape,
     selection,
     metrics: Dict[str, object],
+    method: str = "BUCKET",
 ) -> Dict[str, object]:
+    if method not in {"BUCKET", "FULL"}:
+        raise ValueError(f"不支持的 triton method: {method}")
+
     options = config.options
     splits = options.bucket_splits
     m_split, n_split, k_split = splits[0], splits[1], splits[2]
@@ -36,7 +40,7 @@ def make_bucket_record(
 
     return {
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "method": "BUCKET",
+        "method": method,
         "workload": "bucket_torch_npu",
         "split": split,
         "shape_id": _shape_id(split, idx),

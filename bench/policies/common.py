@@ -27,18 +27,32 @@ def _metrics_score(metrics: Metrics) -> float:
     return INVALID_SCORE
 
 
-def autotune_best(
+def measure_candidates_batch(
     workload: WorkloadT,
     candidates: Sequence[CandidateT],
     batch_evaluator: BatchEvaluatorFn[WorkloadT, CandidateT],
-) -> tuple[CandidateT, Metrics, str]:
+) -> list[Metrics]:
     if not candidates:
-        raise RuntimeError("autotune_best: candidates 为空")
+        raise RuntimeError("measure_candidates_batch: candidates 为空")
 
     metrics_seq = list(batch_evaluator(workload, candidates))
     if len(metrics_seq) != len(candidates):
         raise RuntimeError(
-            f"autotune_best: batch_evaluator 返回长度不匹配，"
+            f"measure_candidates_batch: batch_evaluator 返回长度不匹配，"
+            f"got={len(metrics_seq)} expected={len(candidates)}"
+        )
+    return [dict(met) for met in metrics_seq]
+
+
+def select_best_candidate(
+    candidates: Sequence[CandidateT],
+    metrics_seq: Sequence[Metrics],
+) -> tuple[CandidateT, Metrics]:
+    if not candidates:
+        raise RuntimeError("select_best_candidate: candidates 为空")
+    if len(metrics_seq) != len(candidates):
+        raise RuntimeError(
+            f"select_best_candidate: metrics 数量不匹配，"
             f"got={len(metrics_seq)} expected={len(candidates)}"
         )
 
@@ -54,7 +68,7 @@ def autotune_best(
             best_score = score
 
     if best_cfg is None or best_score >= INVALID_SCORE:
-        raise RuntimeError("autotune_best: 无有效 config（全部 invalid）")
+        raise RuntimeError("select_best_candidate: 无有效 config（全部 invalid）")
     if best_metrics is None:
-        raise RuntimeError("BUG: autotune_best 缺少 best_metrics")
-    return best_cfg, best_metrics, "batch_tune"
+        raise RuntimeError("BUG: select_best_candidate 缺少 best_metrics")
+    return best_cfg, dict(best_metrics)

@@ -4,7 +4,7 @@ import time
 from typing import Dict, List, Tuple
 
 from bench.bucket_tune.types import BenchmarkConfig, BenchmarkState
-from bench.policies.common import SelectionResult, autotune_best
+from bench.policies.common import INVALID_SCORE, SelectionResult
 from bench.reporting.csv_logger import append_records
 
 
@@ -27,6 +27,7 @@ def run_bucket(config: BenchmarkConfig, state: BenchmarkState) -> str:
     if not tuned_keys:
         raise RuntimeError("BUG: tune_set 为空，无法执行 bucket tune")
 
+    # Single-shot collection only: one global batch over bucket_representative_shape * candidate_config.
     tune_entries: List[Tuple[tuple, object]] = []
     key_order = list(first_shape_by_key.keys())
     for key in key_order:
@@ -42,31 +43,37 @@ def run_bucket(config: BenchmarkConfig, state: BenchmarkState) -> str:
             f"BUG: tune batch 返回长度不匹配，got={len(tune_metrics)} expected={len(tune_entries)}"
         )
 
-    metrics_by_shape_cfg: Dict[Tuple[tuple, str], Dict[str, object]] = {}
-    for (shape, cfg), met in zip(tune_entries, tune_metrics):
-        cfg_id = str(getattr(cfg, "config_id", ""))
-        metrics_by_shape_cfg[(shape, cfg_id)] = dict(met)
+    shape_to_key = {shape: key for key, shape in first_shape_by_key.items()}
+    best_cfg_by_key: Dict[object, object] = {}
+    best_metrics_by_key: Dict[object, Dict[str, object]] = {}
+    best_score_by_key: Dict[object, float] = {}
 
-    def eval_from_batch(shape: tuple, cfgs: List[object]) -> List[Dict[str, object]]:
-        out: List[Dict[str, object]] = []
-        for cfg in cfgs:
-            cfg_id = str(getattr(cfg, "config_id", ""))
-            met = metrics_by_shape_cfg.get((shape, cfg_id))
-            if met is None:
-                raise RuntimeError(f"BUG: 缺少 batch tune metrics, shape={shape}, config_id={cfg_id}")
-            out.append(dict(met))
-        return out
+    for (shape, cfg), met in zip(tune_entries, tune_metrics):
+        key = shape_to_key.get(shape)
+        if key is None:
+            raise RuntimeError(f"BUG: shape 未找到对应 key, shape={shape}")
+        invalid = int(met.get("invalid_config", 0))
+        runtime_us = float(met.get("runtime_cost_us", 0.0))
+        score = runtime_us if invalid == 0 and runtime_us > 0.0 else INVALID_SCORE
+        cur_best = best_score_by_key.get(key, INVALID_SCORE)
+        if score < cur_best:
+            best_score_by_key[key] = score
+            best_cfg_by_key[key] = cfg
+            best_metrics_by_key[key] = dict(met)
 
     selection_by_key: Dict[object, SelectionResult[object]] = {}
     for key in key_order:
-        shape = first_shape_by_key[key]
-        best_cfg, best_metrics, notes = autotune_best(shape, candidates, eval_from_batch)
+        best_cfg = best_cfg_by_key.get(key)
+        best_metrics = best_metrics_by_key.get(key)
+        best_score = best_score_by_key.get(key, INVALID_SCORE)
+        if best_cfg is None or best_metrics is None or best_score >= INVALID_SCORE:
+            raise RuntimeError(f"BUCKET tune 失败: key={key} 无有效 config（全部 invalid）")
         selection_by_key[key] = SelectionResult(
             config=best_cfg,
             cache_key=op.eval_key_str(key),
             tune_time_ms=0.0,
-            premeasure=dict(best_metrics),
-            notes=notes,
+            premeasure=best_metrics,
+            notes="batch_tune",
         )
 
     # `tune_time_ms` now represents one global batch-tune walltime for this run.
@@ -130,4 +137,7 @@ def run_bucket(config: BenchmarkConfig, state: BenchmarkState) -> str:
         )
 
     append_records(options.results_csv, rows)
-    return f"method=BUCKET rows={len(rows)} tuned_keys={len(tuned_keys)} splits={splits}"
+    return (
+        f"method=BUCKET rows={len(rows)} tuned_keys={len(tuned_keys)} "
+        f"splits={splits} single_batch=1"
+    )
