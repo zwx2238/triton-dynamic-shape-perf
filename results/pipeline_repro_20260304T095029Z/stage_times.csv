@@ -1,7 +1,0 @@
-stage,start_utc,end_utc,elapsed_sec,detail
-setup_benchmark,2026-03-04T09:50:29Z,2026-03-04T09:50:37Z,8,"results_csv=results/pipeline_repro_20260304T095029Z/bucket_torch.csv,reachable_keys=[0, 1, 2, 3, 4, 5, 6, 7],unreachable_keys=[],eval_keys=[2, 3]"
-benchmark_bucket,2026-03-04T09:50:37Z,2026-03-04T09:51:13Z,35,"method=BUCKET rows=20 tuned_keys=8 splits=(4, 2048, 3072)"
-benchmark_torch,2026-03-04T09:51:13Z,2026-03-04T09:51:13Z,0,"method=TORCH eval_rows=4,async_capture=1,async_wall_sec=35"
-case_compare,2026-03-04T09:51:13Z,2026-03-04T09:51:13Z,0,"case_compare_csv=results/pipeline_repro_20260304T095029Z/bucket_torch_case_compare_eval.csv,rows=4"
-summary,2026-03-04T09:51:13Z,2026-03-04T09:51:13Z,0,"overall=results/pipeline_repro_20260304T095029Z/bucket_torch_summary_overall.csv,tune=results/pipeline_repro_20260304T095029Z/bucket_torch_summary_tune.csv,bucket=results/pipeline_repro_20260304T095029Z/bucket_torch_summary_by_bucket.csv"
-all_total,2026-03-04T09:50:29Z,2026-03-04T09:51:13Z,43,pipeline_total

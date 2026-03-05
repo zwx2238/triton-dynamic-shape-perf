@@ -1,3 +1,0 @@
-method,samples,median_runtime_us,mean_runtime_us,speedup_vs_torch
-TORCH,16,15.740000,18.095500,1.000000
-BUCKET,16,22.761000,26.376875,0.711075

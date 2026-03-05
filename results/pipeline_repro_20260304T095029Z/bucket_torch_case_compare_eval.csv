@@ -1,5 +1,0 @@
-workload,shape_id,M,N,K,dtype,gpu,BLOCK_M,BLOCK_N,BLOCK_K,bucket_key,shape,runtime_cost_us_TORCH,runtime_cost_us_BUCKET,config_id_BUCKET,config_desc_BUCKET,invalid_config_TORCH,invalid_config_BUCKET,timing_source_TORCH,timing_source_BUCKET,speedup_BUCKET_vs_TORCH
-bucket_torch_npu,bucket_torch_eval_000,32,1536,1024,fp16,Ascend910B2,64,128,128,3,32x1536x1024,6.02,6.06,c2,"c2 BM=64,BN=128,BK=128",0,0,npu_profiler_batch_offline_kernel_step,npu_profiler_batch_offline_kernel_step,0.993399
-bucket_torch_npu,bucket_torch_eval_001,32,2048,8192,fp16,Ascend910B2,16,128,128,2,32x2048x8192,21.722,60.962,c0,"c0 BM=16,BN=128,BK=128",0,0,npu_profiler_batch_offline_kernel_step,npu_profiler_batch_offline_kernel_step,0.356320
-bucket_torch_npu,bucket_torch_eval_002,16,2048,4096,fp16,Ascend910B2,16,128,128,2,16x2048x4096,11.402,17.62,c0,"c0 BM=16,BN=128,BK=128",0,0,npu_profiler_batch_offline_kernel_step,npu_profiler_batch_offline_kernel_step,0.647106
-bucket_torch_npu,bucket_torch_eval_003,16,2048,1536,fp16,Ascend910B2,64,128,128,3,16x2048x1536,6.42,8.22,c2,"c2 BM=64,BN=128,BK=128",0,0,npu_profiler_batch_offline_kernel_step,npu_profiler_batch_offline_kernel_step,0.781022

@@ -1,8 +1,0 @@
-stage,start_utc,end_utc,elapsed_sec,detail
-setup_benchmark,2026-03-04T09:41:32Z,2026-03-04T09:41:40Z,7,"results_csv=results/pipeline_repro_20260304T094132Z/bucket_torch.csv,reachable_keys=[0, 1, 2, 3, 4, 5, 6, 7],unreachable_keys=[],eval_keys=[0, 1, 2, 3]"
-prototype,2026-03-04T09:41:40Z,2026-03-04T09:42:01Z,20,"prototype_shapes=4[8x2048x4096,64x6144x1024,4x6144x1024,64x8192x8192] candidates=4[c24,c23,c29,c18] prototype_report_csv=results/pipeline_repro_20260304T094132Z/prototype_best.csv"
-benchmark_bucket,2026-03-04T09:42:01Z,2026-03-04T09:42:38Z,36,"method=BUCKET rows=32 tuned_keys=8 splits=(4, 2048, 3072)"
-benchmark_torch,2026-03-04T09:42:38Z,2026-03-04T09:42:38Z,0,"method=TORCH eval_rows=16,async_capture=1,async_wall_sec=57"
-case_compare,2026-03-04T09:42:38Z,2026-03-04T09:42:38Z,0,"case_compare_csv=results/pipeline_repro_20260304T094132Z/bucket_torch_case_compare_eval.csv,rows=16"
-summary,2026-03-04T09:42:38Z,2026-03-04T09:42:38Z,0,"overall=results/pipeline_repro_20260304T094132Z/bucket_torch_summary_overall.csv,tune=results/pipeline_repro_20260304T094132Z/bucket_torch_summary_tune.csv,bucket=results/pipeline_repro_20260304T094132Z/bucket_torch_summary_by_bucket.csv"
-all_total,2026-03-04T09:41:32Z,2026-03-04T09:42:38Z,65,pipeline_total
