@@ -4,7 +4,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import torch
 import triton
@@ -14,7 +14,6 @@ from .configs import MatmulConfig
 from bench.kernels.npu_measure import (
     align_ascend_toolchain_env,
     get_device_name,
-    measure_latencies_us,
     profile_npu_step_launches_us,
     resolve_device,
     synchronize,
@@ -221,57 +220,128 @@ class TritonMatmulEvaluator:
         swizzle_direction = 1 if M < N else 0
         return f"launch=fixed_cores({launch_programs}),swizzle2d_g={swizzle_group},dir={swizzle_direction}"
 
-    def evaluate(self, shape: Shape, cfg: MatmulConfig) -> Dict[str, object]:
-        compile_time_ms = 0.0
-        compile_key = (
-            str(self.device),
-            self.dtype_name,
-            cfg.config_id,
-        )
+    def _compile_key(self, cfg: MatmulConfig) -> tuple[str, str, str]:
+        return (str(self.device), self.dtype_name, cfg.config_id)
 
-        try:
-            a, b, c = self._get_tensors(shape)
+    def _prepare_tensor_map(
+        self,
+        entries: Sequence[tuple[Shape, MatmulConfig]],
+    ) -> Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        ordered_shapes = list(dict.fromkeys(shape for shape, _ in entries))
+        tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        for shape in ordered_shapes:
+            tensor_map[shape] = self._get_tensors(shape)
+        return tensor_map
 
-            if compile_key not in self.compile_cache:
-                t0 = time.perf_counter()
-                self._launch(a, b, c, cfg)
-                synchronize(self.device)
-                compile_time_ms = (time.perf_counter() - t0) * 1000.0
-                self.compile_cache.add(compile_key)
+    def _precompile_entries(
+        self,
+        entries: Sequence[tuple[Shape, MatmulConfig]],
+        tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    ) -> list[float]:
+        compile_time_by_index = [0.0 for _ in entries]
+        seen_compile: set[tuple[str, str, str]] = set()
+        for idx, (shape, cfg) in enumerate(entries):
+            compile_key = self._compile_key(cfg)
+            if compile_key in self.compile_cache or compile_key in seen_compile:
+                continue
+            a, b, c = tensor_map[shape]
+            t0 = time.perf_counter()
+            self._launch(a, b, c, cfg)
+            synchronize(self.device)
+            compile_ms = (time.perf_counter() - t0) * 1000.0
+            compile_time_by_index[idx] = compile_ms
+            seen_compile.add(compile_key)
+            self.compile_cache.add(compile_key)
+        return compile_time_by_index
 
+    def _warmup_unique_entries(
+        self,
+        entries: Sequence[tuple[Shape, MatmulConfig]],
+        tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    ) -> None:
+        unique_entries = list(dict.fromkeys((shape, cfg.config_id) for shape, cfg in entries))
+        cfg_map = {cfg.config_id: cfg for _, cfg in entries}
+        for shape, cfg_id in unique_entries:
+            a, b, c = tensor_map[shape]
+            cfg = cfg_map[cfg_id]
             for _ in range(self.warmup):
                 self._launch(a, b, c, cfg)
             synchronize(self.device)
 
-            latencies_us, timing_note = measure_latencies_us(
-                self.device,
-                self.repeat,
-                lambda: self._launch(a, b, c, cfg),
+    def _build_step_launches(
+        self,
+        entries: Sequence[tuple[Shape, MatmulConfig]],
+        tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    ) -> list[Callable[[], None]]:
+        step_launches: list[Callable[[], None]] = []
+        for shape, cfg in entries:
+            a, b, c = tensor_map[shape]
+            for _ in range(self.repeat):
+                step_launches.append(lambda a=a, b=b, c=c, cfg=cfg: self._launch(a, b, c, cfg))
+        return step_launches
+
+    def _profile_step_launches(
+        self,
+        entries: Sequence[tuple[Shape, MatmulConfig]],
+        step_launches: list[Callable[[], None]],
+    ) -> tuple[list[float], str]:
+        step_latencies, timing_note = profile_npu_step_launches_us(self.device, step_launches)
+        expected = len(entries) * self.repeat
+        if len(step_latencies) < expected:
+            raise RuntimeError(
+                f"profile_npu_step_launches_us 返回长度不足: got={len(step_latencies)} expected={expected}"
             )
+        return step_latencies, timing_note
 
-            p50_us = _percentile(latencies_us, 50)
+    def _make_notes(self, shape: Shape, cfg: MatmulConfig, timing_note: str) -> str:
+        note_parts = []
+        if self.env_notes:
+            note_parts.append(self.env_notes)
+        note_parts.append(self._kernel_launch_note(shape, cfg))
+        note_parts.append(f"timing={timing_note}")
+        return ";".join(note_parts)
 
-            note_parts = []
-            if self.env_notes:
-                note_parts.append(self.env_notes)
-            note_parts.append(self._kernel_launch_note(shape, cfg))
-            note_parts.append(f"timing={timing_note}")
-            return EvalMetrics(
-                compile_time_ms=compile_time_ms,
-                runtime_cost_us=p50_us,
-                invalid_config=0,
-                notes=";".join(note_parts),
-            ).to_dict()
-        except Exception as exc:  # noqa: BLE001
-            note = f"{type(exc).__name__}: {exc}"
-            if self.env_notes:
-                note = f"{self.env_notes};{note}"
-            return EvalMetrics(
-                compile_time_ms=compile_time_ms,
+    def _build_success_metrics(
+        self,
+        entries: Sequence[tuple[Shape, MatmulConfig]],
+        compile_time_by_index: list[float],
+        step_latencies: list[float],
+        timing_note: str,
+    ) -> list[Dict[str, object]]:
+        out: list[Dict[str, object]] = []
+        for idx, (shape, cfg) in enumerate(entries):
+            start = idx * self.repeat
+            end = start + self.repeat
+            latencies = step_latencies[start:end]
+            p50_us = _percentile(latencies, 50)
+            out.append(
+                EvalMetrics(
+                    compile_time_ms=compile_time_by_index[idx],
+                    runtime_cost_us=p50_us,
+                    invalid_config=0,
+                    notes=self._make_notes(shape, cfg, timing_note),
+                ).to_dict()
+            )
+        return out
+
+    def _build_error_metrics(
+        self,
+        entries: Sequence[tuple[Shape, MatmulConfig]],
+        compile_time_by_index: list[float],
+        exc: Exception,
+    ) -> list[Dict[str, object]]:
+        note = f"{type(exc).__name__}: {exc}"
+        if self.env_notes:
+            note = f"{self.env_notes};{note}"
+        return [
+            EvalMetrics(
+                compile_time_ms=compile_time_by_index[idx],
                 runtime_cost_us=0.0,
                 invalid_config=1,
                 notes=note,
             ).to_dict()
+            for idx, _ in enumerate(entries)
+        ]
 
     def evaluate_batch(
         self,
@@ -280,68 +350,13 @@ class TritonMatmulEvaluator:
         if not entries:
             return []
 
+        compile_time_by_index = [0.0 for _ in entries]
         try:
-            ordered_shapes = list(dict.fromkeys(shape for shape, _ in entries))
-            tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-            for shape in ordered_shapes:
-                tensor_map[shape] = self._get_tensors(shape)
-
-            compile_time_by_index = [0.0 for _ in entries]
-            seen_compile: set[tuple[str, str, str]] = set()
-            for idx, (shape, cfg) in enumerate(entries):
-                compile_key = (str(self.device), self.dtype_name, cfg.config_id)
-                if compile_key in self.compile_cache or compile_key in seen_compile:
-                    continue
-                a, b, c = tensor_map[shape]
-                t0 = time.perf_counter()
-                self._launch(a, b, c, cfg)
-                synchronize(self.device)
-                compile_ms = (time.perf_counter() - t0) * 1000.0
-                compile_time_by_index[idx] = compile_ms
-                seen_compile.add(compile_key)
-                self.compile_cache.add(compile_key)
-
-            unique_entries = list(dict.fromkeys((shape, cfg.config_id) for shape, cfg in entries))
-            cfg_map = {cfg.config_id: cfg for _, cfg in entries}
-            for shape, cfg_id in unique_entries:
-                a, b, c = tensor_map[shape]
-                cfg = cfg_map[cfg_id]
-                for _ in range(self.warmup):
-                    self._launch(a, b, c, cfg)
-                synchronize(self.device)
-
-            step_launches = []
-            for shape, cfg in entries:
-                a, b, c = tensor_map[shape]
-                for _ in range(self.repeat):
-                    step_launches.append(lambda a=a, b=b, c=c, cfg=cfg: self._launch(a, b, c, cfg))
-
-            step_latencies, timing_note = profile_npu_step_launches_us(self.device, step_launches)
-            if len(step_latencies) < len(entries) * self.repeat:
-                return [self.evaluate(shape, cfg) for shape, cfg in entries]
-
-            out: list[Dict[str, object]] = []
-            for idx, (shape, _) in enumerate(entries):
-                start = idx * self.repeat
-                end = start + self.repeat
-                latencies = step_latencies[start:end]
-
-                p50_us = _percentile(latencies, 50)
-
-                note_parts = []
-                if self.env_notes:
-                    note_parts.append(self.env_notes)
-                note_parts.append(self._kernel_launch_note(shape, entries[idx][1]))
-                note_parts.append(f"timing={timing_note}")
-
-                out.append(
-                    EvalMetrics(
-                        compile_time_ms=compile_time_by_index[idx],
-                        runtime_cost_us=p50_us,
-                        invalid_config=0,
-                        notes=";".join(note_parts),
-                    ).to_dict()
-                )
-            return out
-        except Exception:  # noqa: BLE001
-            return [self.evaluate(shape, cfg) for shape, cfg in entries]
+            tensor_map = self._prepare_tensor_map(entries)
+            compile_time_by_index = self._precompile_entries(entries, tensor_map)
+            self._warmup_unique_entries(entries, tensor_map)
+            step_launches = self._build_step_launches(entries, tensor_map)
+            step_latencies, timing_note = self._profile_step_launches(entries, step_launches)
+            return self._build_success_metrics(entries, compile_time_by_index, step_latencies, timing_note)
+        except Exception as exc:  # noqa: BLE001
+            return self._build_error_metrics(entries, compile_time_by_index, exc)

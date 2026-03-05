@@ -107,6 +107,12 @@ def _print_case_compare(compare_csv: Path) -> None:
             k = str(row.get("K", "")).strip()
             shape = f"{m}x{n}x{k}" if m and n and k else ""
 
+        config_bucket = row.get("config_desc_BUCKET", "") or row.get("config_id_BUCKET", "")
+        config_full = row.get("config_desc_FULL", "") or row.get("config_id_FULL", "")
+        config_bucket_eq_full = ""
+        if has_full and config_bucket and config_full:
+            config_bucket_eq_full = str(config_bucket).strip() == str(config_full).strip()
+
         bucket_speedup_text = row.get(bucket_speedup_col, "") if bucket_speedup_col else ""
         full_speedup_text = row.get(full_speedup_col, "") if full_speedup_col else ""
         bucket_over_full_text = row.get(bucket_over_full_col, "") if bucket_over_full_col else ""
@@ -133,19 +139,26 @@ def _print_case_compare(compare_csv: Path) -> None:
             bucket_over_full_value = 0.0
         if bucket_over_full_value > 0:
             bucket_over_full_vals.append(bucket_over_full_value)
+        bucket_over_full_delta_pct_text = (
+            f"{(bucket_over_full_value - 1.0) * 100.0:.6f}%"
+            if bucket_over_full_value > 0
+            else ""
+        )
 
         display_rows.append(
             {
                 "shape_id": row.get("shape_id", ""),
                 "shape": shape,
-                "config_bucket": row.get("config_desc_BUCKET", "") or row.get("config_id_BUCKET", ""),
-                "config_full": row.get("config_desc_FULL", "") or row.get("config_id_FULL", ""),
+                "config_bucket": config_bucket,
+                "config_full": config_full,
+                "config_bucket_eq_full": config_bucket_eq_full,
                 "runtime_torch_us": row.get("runtime_cost_us_TORCH", ""),
                 "runtime_bucket_us": row.get("runtime_cost_us_BUCKET", ""),
                 "runtime_full_us": row.get("runtime_cost_us_FULL", ""),
                 "speedup_bucket_vs_torch": bucket_speedup_text,
                 "speedup_full_vs_torch": full_speedup_text,
                 "speedup_bucket_vs_full": bucket_over_full_text,
+                "speedup_bucket_vs_full_delta_pct": bucket_over_full_delta_pct_text,
             }
         )
     display_rows.sort(key=lambda r: _shape_sort_key(str(r.get("shape_id", ""))))
@@ -159,18 +172,22 @@ def _print_case_compare(compare_csv: Path) -> None:
             "shape": "geomean",
             "config_bucket": "",
             "config_full": "",
+            "config_bucket_eq_full": "",
             "runtime_torch_us": "",
             "runtime_bucket_us": "",
             "runtime_full_us": "",
             "speedup_bucket_vs_torch": _fmt(gm_bucket_speedup) if gm_bucket_speedup > 0 else "",
             "speedup_full_vs_torch": _fmt(gm_full_speedup) if gm_full_speedup > 0 else "",
             "speedup_bucket_vs_full": _fmt(gm_bucket_over_full) if gm_bucket_over_full > 0 else "",
+            "speedup_bucket_vs_full_delta_pct": f"{(gm_bucket_over_full - 1.0) * 100.0:.6f}%"
+            if gm_bucket_over_full > 0
+            else "",
         }
     )
 
     headers = ["shape_id", "shape", "config_bucket"]
     if has_full:
-        headers.append("config_full")
+        headers.extend(["config_full", "config_bucket_eq_full"])
     headers.extend(
         [
             "runtime_torch_us",
@@ -181,7 +198,9 @@ def _print_case_compare(compare_csv: Path) -> None:
         headers.append("runtime_full_us")
     headers.extend(["speedup_bucket_vs_torch"])
     if has_full:
-        headers.extend(["speedup_full_vs_torch", "speedup_bucket_vs_full"])
+        headers.extend(
+            ["speedup_full_vs_torch", "speedup_bucket_vs_full", "speedup_bucket_vs_full_delta_pct"]
+        )
 
     _print_section(
         "CASE COMPARE (EVAL)",
