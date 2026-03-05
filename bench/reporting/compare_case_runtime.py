@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import math
+import statistics
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 
 def _to_float(text: str) -> float:
@@ -10,6 +12,17 @@ def _to_float(text: str) -> float:
         return float(text)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _fmt(value: float) -> str:
+    return f"{value:.6f}"
+
+
+def _geometric_mean(values: Iterable[float]) -> float:
+    vals = [v for v in values if v > 0]
+    if not vals:
+        return 0.0
+    return math.exp(statistics.fmean(math.log(v) for v in vals))
 
 
 def _shape_sort_key(shape_id: str) -> Tuple[int, str]:
@@ -70,6 +83,26 @@ def _format_config_desc(method: str, row: Dict[str, str]) -> str:
     return str(row.get("config_id", "")).strip()
 
 
+def _print_section(title: str, rows: List[Dict[str, object]], headers: List[str]) -> None:
+    print(f"\n=== {title} ===")
+    if not rows:
+        print("(empty)")
+        return
+
+    widths: Dict[str, int] = {}
+    for h in headers:
+        widths[h] = len(h)
+    for row in rows:
+        for h in headers:
+            widths[h] = max(widths[h], len(str(row.get(h, ""))))
+
+    line = "  ".join(h.ljust(widths[h]) for h in headers)
+    print(line)
+    print("  ".join("-" * widths[h] for h in headers))
+    for row in rows:
+        print("  ".join(str(row.get(h, "")).ljust(widths[h]) for h in headers))
+
+
 PER_METHOD_COLS = {
     "method", "config_id", "compile_time_ms", "tune_time_ms",
     "runtime_cost_us", "cache_key", "invalid_config", "notes", "timestamp",
@@ -82,6 +115,7 @@ def compare_case_runtime(
     split: str = "eval",
     out_csv: Path | None = None,
     allow_mixed_metric: bool = False,
+    print_table: bool = True,
 ) -> tuple[Path, int]:
     if not input_csv.exists():
         raise FileNotFoundError(f"找不到输入文件: {input_csv}")
@@ -150,6 +184,8 @@ def compare_case_runtime(
 
         shape_id = row.get("shape_id", "")
         out = table.setdefault(shape_id, {c: row.get(c, "") for c in shared_cols})
+        if "shape_id" not in out or not str(out.get("shape_id", "")).strip():
+            out["shape_id"] = shape_id
         if "shape" not in out or not str(out.get("shape", "")).strip():
             out["shape"] = _format_shape(row)
 
@@ -160,13 +196,7 @@ def compare_case_runtime(
         out[f"invalid_config_{method}"] = row.get("invalid_config", "")
         out[f"timing_source_{method}"] = _extract_timing(row.get("notes", ""))
 
-    runtime_cols = [f"runtime_cost_us_{m}" for m in methods]
     target_methods = [m for m in methods if m != "TORCH"]
-    cfg_cols = [f"config_id_{m}" for m in target_methods]
-    cfg_desc_cols = [f"config_desc_{m}" for m in target_methods]
-    invalid_cols = [f"invalid_config_{m}" for m in methods]
-    timing_cols = [f"timing_source_{m}" for m in methods]
-    speedup_cols: List[str] = [f"speedup_{m}_vs_TORCH" for m in target_methods]
     cross_speedup_cols: List[str] = []
     if "BUCKET" in methods and "FULL" in methods:
         cross_speedup_cols.append("speedup_BUCKET_vs_FULL")
@@ -191,22 +221,110 @@ def compare_case_runtime(
             else:
                 row["speedup_BUCKET_vs_FULL"] = ""
 
-    out_rows.sort(key=lambda r: _shape_sort_key(r.get("shape_id", "")))
+    out_rows.sort(key=lambda r: _shape_sort_key(str(r.get("shape_id", ""))))
 
-    fieldnames = [
-        *shared_cols,
-        *runtime_cols,
-        *cfg_cols,
-        *cfg_desc_cols,
-        *invalid_cols,
-        *timing_cols,
-        *speedup_cols,
-        *cross_speedup_cols,
-    ]
+    has_full = ("FULL" in methods)
+    display_rows: List[Dict[str, object]] = []
+    bucket_speedup_vals: List[float] = []
+    full_speedup_vals: List[float] = []
+    bucket_over_full_vals: List[float] = []
+    for row in out_rows:
+        shape = str(row.get("shape", "")).strip()
+        if not shape:
+            shape = _format_shape(row)
+
+        config_bucket = row.get("config_desc_BUCKET", "") or row.get("config_id_BUCKET", "")
+        config_full = row.get("config_desc_FULL", "") or row.get("config_id_FULL", "")
+        config_bucket_eq_full = ""
+        if has_full and config_bucket and config_full:
+            config_bucket_eq_full = str(config_bucket).strip() == str(config_full).strip()
+
+        bucket_speedup_text = row.get("speedup_BUCKET_vs_TORCH", "")
+        full_speedup_text = row.get("speedup_FULL_vs_TORCH", "")
+        bucket_over_full_text = row.get("speedup_BUCKET_vs_FULL", "")
+
+        bucket_speedup_value = _to_float(bucket_speedup_text)
+        if bucket_speedup_value > 0:
+            bucket_speedup_vals.append(bucket_speedup_value)
+        full_speedup_value = _to_float(full_speedup_text)
+        if full_speedup_value > 0:
+            full_speedup_vals.append(full_speedup_value)
+        bucket_over_full_value = _to_float(bucket_over_full_text)
+        if bucket_over_full_value > 0:
+            bucket_over_full_vals.append(bucket_over_full_value)
+        bucket_over_full_delta_pct_text = (
+            f"{(bucket_over_full_value - 1.0) * 100.0:.6f}%"
+            if bucket_over_full_value > 0
+            else ""
+        )
+
+        display_rows.append(
+            {
+                "shape_id": row.get("shape_id", ""),
+                "shape": shape,
+                "config_bucket": config_bucket,
+                "config_full": config_full,
+                "config_bucket_eq_full": config_bucket_eq_full,
+                "runtime_torch_us": row.get("runtime_cost_us_TORCH", ""),
+                "runtime_bucket_us": row.get("runtime_cost_us_BUCKET", ""),
+                "runtime_full_us": row.get("runtime_cost_us_FULL", ""),
+                "speedup_bucket_vs_torch": bucket_speedup_text,
+                "speedup_full_vs_torch": full_speedup_text,
+                "speedup_bucket_vs_full": bucket_over_full_text,
+                "speedup_bucket_vs_full_delta_pct": bucket_over_full_delta_pct_text,
+            }
+        )
+
+    gm_bucket_speedup = _geometric_mean(bucket_speedup_vals)
+    gm_full_speedup = _geometric_mean(full_speedup_vals)
+    gm_bucket_over_full = _geometric_mean(bucket_over_full_vals)
+    display_rows.append(
+        {
+            "shape_id": "speedup_vs_torch",
+            "shape": "geomean",
+            "config_bucket": "",
+            "config_full": "",
+            "config_bucket_eq_full": "",
+            "runtime_torch_us": "",
+            "runtime_bucket_us": "",
+            "runtime_full_us": "",
+            "speedup_bucket_vs_torch": _fmt(gm_bucket_speedup) if gm_bucket_speedup > 0 else "",
+            "speedup_full_vs_torch": _fmt(gm_full_speedup) if gm_full_speedup > 0 else "",
+            "speedup_bucket_vs_full": _fmt(gm_bucket_over_full) if gm_bucket_over_full > 0 else "",
+            "speedup_bucket_vs_full_delta_pct": f"{(gm_bucket_over_full - 1.0) * 100.0:.6f}%"
+            if gm_bucket_over_full > 0
+            else "",
+        }
+    )
+
+    fieldnames = ["shape_id", "shape", "config_bucket"]
+    if has_full:
+        fieldnames.extend(["config_full", "config_bucket_eq_full"])
+    fieldnames.extend(
+        [
+            "runtime_torch_us",
+            "runtime_bucket_us",
+        ]
+    )
+    if has_full:
+        fieldnames.append("runtime_full_us")
+    fieldnames.extend(["speedup_bucket_vs_torch"])
+    if has_full:
+        fieldnames.extend(
+            ["speedup_full_vs_torch", "speedup_bucket_vs_full", "speedup_bucket_vs_full_delta_pct"]
+        )
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     with out_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(out_rows)
-    return out_csv, len(out_rows)
+        writer.writerows(display_rows)
+
+    if print_table:
+        with out_csv.open("r", newline="", encoding="utf-8") as f:
+            saved_reader = csv.DictReader(f)
+            saved_rows = list(saved_reader)
+            saved_headers = list(saved_reader.fieldnames or [])
+        _print_section("CASE COMPARE (EVAL)", saved_rows, saved_headers)
+
+    return out_csv, len(display_rows)

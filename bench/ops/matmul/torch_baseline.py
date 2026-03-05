@@ -3,12 +3,11 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import torch
 from bench.kernels.npu_measure import (
     get_device_name,
-    measure_latencies_us,
     profile_npu_step_launches_us,
     resolve_device,
     synchronize,
@@ -114,100 +113,118 @@ class TorchMatmulEvaluator:
     def get_torch_config_id(self) -> str:
         return _torch_mm_config_id(self.device)
 
-    def evaluate(self, shape: Shape) -> Dict[str, object]:
-        compile_time_ms = 0.0
+    def _prepare_tensor_map(self, shapes: Sequence[Shape]) -> Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        ordered_unique = list(dict.fromkeys(shapes))
+        tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        for shape in ordered_unique:
+            tensor_map[shape] = self._get_tensors(shape)
+        return tensor_map
 
-        try:
-            a, b, c = self._get_tensors(shape)
+    def _precompile_first_launch(
+        self,
+        shapes: Sequence[Shape],
+        tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    ) -> float:
+        if self._first_launch_done:
+            return 0.0
+        first_shape = shapes[0]
+        a, b, c = tensor_map[first_shape]
+        t0 = time.perf_counter()
+        self._launch(a, b, c)
+        synchronize(self.device)
+        compile_time_ms_first = (time.perf_counter() - t0) * 1000.0
+        self._first_launch_done = True
+        return compile_time_ms_first
 
-            if not self._first_launch_done:
-                t0 = time.perf_counter()
-                self._launch(a, b, c)
-                synchronize(self.device)
-                compile_time_ms = (time.perf_counter() - t0) * 1000.0
-                self._first_launch_done = True
-
+    def _warmup_unique_shapes(
+        self,
+        tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    ) -> None:
+        for a, b, c in tensor_map.values():
             for _ in range(self.warmup):
                 self._launch(a, b, c)
             synchronize(self.device)
 
-            latencies_us, timing_note = measure_latencies_us(
-                self.device,
-                self.repeat,
-                lambda: self._launch(a, b, c),
+    def _build_step_launches(
+        self,
+        shapes: Sequence[Shape],
+        tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    ) -> list[Callable[[], None]]:
+        step_launches: list[Callable[[], None]] = []
+        for shape in shapes:
+            a, b, c = tensor_map[shape]
+            for _ in range(self.repeat):
+                step_launches.append(lambda a=a, b=b, c=c: self._launch(a, b, c))
+        return step_launches
+
+    def _profile_step_launches(
+        self,
+        shapes: Sequence[Shape],
+        step_launches: list[Callable[[], None]],
+    ) -> tuple[list[float], str]:
+        step_latencies, timing_note = profile_npu_step_launches_us(self.device, step_launches)
+        expected = len(shapes) * self.repeat
+        if len(step_latencies) < expected:
+            raise RuntimeError(
+                f"profile_npu_step_launches_us 返回长度不足: got={len(step_latencies)} expected={expected}"
             )
+        return step_latencies, timing_note
 
-            p50_us = _percentile(latencies_us, 50)
+    def _make_notes(self, timing_note: str) -> str:
+        return f"{self.get_torch_config_id()};timing={timing_note}"
 
-            note = f"{self.get_torch_config_id()};timing={timing_note}"
-            return EvalMetrics(
-                compile_time_ms=compile_time_ms,
-                runtime_cost_us=p50_us,
-                invalid_config=0,
-                notes=note,
-            ).to_dict()
-        except Exception as exc:  # noqa: BLE001
-            return EvalMetrics(
-                compile_time_ms=compile_time_ms,
+    def _build_success_metrics(
+        self,
+        shapes: Sequence[Shape],
+        compile_time_ms_first: float,
+        step_latencies: list[float],
+        timing_note: str,
+    ) -> list[Dict[str, object]]:
+        out: list[Dict[str, object]] = []
+        for idx, _ in enumerate(shapes):
+            start = idx * self.repeat
+            end = start + self.repeat
+            latencies = step_latencies[start:end]
+            p50_us = _percentile(latencies, 50)
+            compile_time_ms = compile_time_ms_first if idx == 0 else 0.0
+            out.append(
+                EvalMetrics(
+                    compile_time_ms=compile_time_ms,
+                    runtime_cost_us=p50_us,
+                    invalid_config=0,
+                    notes=self._make_notes(timing_note),
+                ).to_dict()
+            )
+        return out
+
+    def _build_error_metrics(
+        self,
+        shapes: Sequence[Shape],
+        compile_time_ms_first: float,
+        exc: Exception,
+    ) -> list[Dict[str, object]]:
+        note = f"{type(exc).__name__}: {exc}"
+        return [
+            EvalMetrics(
+                compile_time_ms=compile_time_ms_first if idx == 0 else 0.0,
                 runtime_cost_us=0.0,
                 invalid_config=1,
-                notes=f"{type(exc).__name__}: {exc}",
+                notes=note,
             ).to_dict()
+            for idx, _ in enumerate(shapes)
+        ]
 
     def evaluate_batch(self, shapes: Sequence[Shape]) -> list[Dict[str, object]]:
         if not shapes:
             return []
 
+        compile_time_ms_first = 0.0
         try:
-            ordered_unique = list(dict.fromkeys(shapes))
-            tensor_map: Dict[Shape, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-            for shape in ordered_unique:
-                tensor_map[shape] = self._get_tensors(shape)
-
-            compile_time_ms_first = 0.0
-            if not self._first_launch_done:
-                first_shape = ordered_unique[0]
-                a, b, c = tensor_map[first_shape]
-                t0 = time.perf_counter()
-                self._launch(a, b, c)
-                synchronize(self.device)
-                compile_time_ms_first = (time.perf_counter() - t0) * 1000.0
-                self._first_launch_done = True
-
-            for shape in ordered_unique:
-                a, b, c = tensor_map[shape]
-                for _ in range(self.warmup):
-                    self._launch(a, b, c)
-                synchronize(self.device)
-
-            step_launches = []
-            for shape in shapes:
-                a, b, c = tensor_map[shape]
-                for _ in range(self.repeat):
-                    step_launches.append(lambda a=a, b=b, c=c: self._launch(a, b, c))
-
-            step_latencies, timing_note = profile_npu_step_launches_us(self.device, step_launches)
-            if len(step_latencies) < len(shapes) * self.repeat:
-                return [self.evaluate(shape) for shape in shapes]
-
-            out: list[Dict[str, object]] = []
-            for idx, shape in enumerate(shapes):
-                start = idx * self.repeat
-                end = start + self.repeat
-                latencies = step_latencies[start:end]
-
-                p50_us = _percentile(latencies, 50)
-
-                note = f"{self.get_torch_config_id()};timing={timing_note}"
-                compile_time_ms = compile_time_ms_first if idx == 0 else 0.0
-                out.append(
-                    EvalMetrics(
-                        compile_time_ms=compile_time_ms,
-                        runtime_cost_us=p50_us,
-                        invalid_config=0,
-                        notes=note,
-                    ).to_dict()
-                )
-            return out
-        except Exception:  # noqa: BLE001
-            return [self.evaluate(shape) for shape in shapes]
+            tensor_map = self._prepare_tensor_map(shapes)
+            compile_time_ms_first = self._precompile_first_launch(shapes, tensor_map)
+            self._warmup_unique_shapes(tensor_map)
+            step_launches = self._build_step_launches(shapes, tensor_map)
+            step_latencies, timing_note = self._profile_step_launches(shapes, step_launches)
+            return self._build_success_metrics(shapes, compile_time_ms_first, step_latencies, timing_note)
+        except Exception as exc:  # noqa: BLE001
+            return self._build_error_metrics(shapes, compile_time_ms_first, exc)

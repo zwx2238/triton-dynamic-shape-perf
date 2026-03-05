@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
-import csv
 import datetime as dt
 import logging
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -16,7 +16,6 @@ from bench.bucket_tune.types import BenchmarkConfig, BenchmarkOptions, Benchmark
 from bench.ops import list_operators
 from bench.reporting.compare_case_runtime import compare_case_runtime
 from bench.reporting.csv_logger import append_records
-from bench.reporting.summarize_results import summarize
 from bench.stages.bucket_stage import run_bucket
 from bench.stages.full_stage import run_full
 from bench.stages.prototype_stage import run_prototype
@@ -27,11 +26,7 @@ def utc_ts() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def utc_iso() -> str:
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def build_logger(log_file: Path) -> logging.Logger:
+def build_logger() -> logging.Logger:
     logger = logging.getLogger("bucket_tune_pipeline")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
@@ -39,15 +34,10 @@ def build_logger(log_file: Path) -> logging.Logger:
 
     fmt_date = "%Y-%m-%dT%H:%M:%SZ"
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt=fmt_date))
-    file_handler.formatter.converter = time.gmtime
-
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt=fmt_date))
     stream_handler.formatter.converter = time.gmtime
 
-    logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
     return logger
 
@@ -81,62 +71,29 @@ class Pipeline:
             self.run_dir = Path("results") / f"pipeline_repro_{utc_ts()}"
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
-        self.log_file = self.run_dir / "pipeline.log"
-        self.status_file = self.run_dir / "status.txt"
-        self.stage_times_csv = self.run_dir / "stage_times.csv"
-        self.proto_report_csv = self.run_dir / "prototype_best.csv"
-        self.main_results_csv = self.run_dir / "bucket_torch.csv"
         self.case_compare_csv = self.run_dir / "bucket_torch_case_compare_eval.csv"
-        self.summary_prefix = "bucket_torch"
 
-        self.logger = build_logger(self.log_file)
+        self.logger = build_logger()
         self.stage_elapsed_sec: list[tuple[str, int]] = []
 
-        with self.stage_times_csv.open("w", newline="", encoding="utf-8") as f:
-            f.write("stage,start_utc,end_utc,elapsed_sec,detail\n")
-
-    def update_status(self, status: str, stage: str) -> None:
-        text = "\n".join(
-            [
-                f"status={status}",
-                f"stage={stage}",
-                f"updated_at={utc_iso()}",
-                f"run_dir={self.run_dir}",
-                f"log_file={self.log_file}",
-            ]
-        )
-        self.status_file.write_text(text + "\n", encoding="utf-8")
-
-    def append_stage_time(self, stage: str, start_utc: str, end_utc: str, elapsed: int, detail: str = "") -> None:
-        with self.stage_times_csv.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([stage, start_utc, end_utc, elapsed, detail])
-
     def run_stage(self, stage: str, fn: Callable[[], Optional[str]]) -> None:
-        start_utc = utc_iso()
         t0 = time.time()
-        self.update_status("running", stage)
         self.logger.info("START stage=%s", stage)
-        detail = ""
         try:
-            out = fn()
-            if out:
-                detail = out
+            detail = fn() or ""
         except Exception:
-            self.update_status("failed", stage)
             self.logger.exception("FAILED stage=%s", stage)
             raise
         elapsed = int(time.time() - t0)
-        end_utc = utc_iso()
         self.logger.info("END stage=%s elapsed_sec=%s", stage, elapsed)
+        if detail:
+            self.logger.info("stage_detail stage=%s %s", stage, detail)
         self.stage_elapsed_sec.append((stage, elapsed))
-        self.append_stage_time(stage, start_utc, end_utc, elapsed, detail)
 
     def run(self) -> None:
         args = self.args
         if int(args.prototype_count) < 0:
             raise ValueError(f"要求 --prototype-count >= 0（当前: {args.prototype_count}）")
-        pipeline_start_utc = utc_iso()
         pipeline_t0 = time.time()
 
         self.logger.info("run_dir=%s", self.run_dir)
@@ -152,141 +109,128 @@ class Pipeline:
             args.bucket_splits,
         )
 
-        options = BenchmarkOptions(
-            prototype_count=int(args.prototype_count),
-            prototype_report_csv=str(self.proto_report_csv),
-            tune_size=int(args.tune_size),
-            eval_size=int(args.eval_size),
-            seed=int(args.seed),
-            op_name=str(args.op),
-            dtype=str(args.dtype),
-            warmup=int(args.warmup),
-            repeat=int(args.repeat),
-            bucket_splits=tuple(args.bucket_splits),
-            results_csv=str(self.main_results_csv),
-            reset_results=True,
-        )
-        benchmark_config: Optional[BenchmarkConfig] = None
-        benchmark_state: Optional[BenchmarkState] = None
-        torch_pool = cf.ThreadPoolExecutor(max_workers=1)
-        torch_future: Optional[cf.Future[tuple[str, list[dict[str, object]]]]] = None
-        torch_launch_t0 = 0.0
-
-        def require_context() -> tuple[BenchmarkConfig, BenchmarkState]:
-            if benchmark_config is None or benchmark_state is None:
-                raise RuntimeError("benchmark 尚未初始化")
-            return benchmark_config, benchmark_state
-
-        def setup_benchmark_stage() -> str:
-            nonlocal benchmark_config
-            nonlocal benchmark_state
-            benchmark_config = build_benchmark_config(options)
-            benchmark_state = build_benchmark_state(options.op_name)
-            op = benchmark_config.op
-            splits = options.bucket_splits
-            reachable_keys = sorted({int(op.eval_key(shape, splits)) for shape in benchmark_config.tune_set})
-            eval_keys = sorted({int(op.eval_key(shape, splits)) for shape in benchmark_config.eval_set})
-            all_keys = []
-            if hasattr(op, "all_bucket_keys"):
-                try:
-                    all_keys = sorted(int(k) for k in op.all_bucket_keys())
-                except Exception:  # noqa: BLE001
-                    all_keys = []
-            unreachable_keys = [k for k in all_keys if k not in set(reachable_keys)]
-            self.logger.info(
-                "bucket_key_info splits=%s reachable=%s unreachable=%s eval=%s",
-                list(splits),
-                reachable_keys,
-                unreachable_keys,
-                eval_keys,
+        with tempfile.TemporaryDirectory(prefix="bucket_tune_pipeline_") as tmp_dir:
+            tmp_dir_path = Path(tmp_dir)
+            tmp_results_csv = tmp_dir_path / "bucket_torch.csv"
+            tmp_proto_report_csv = tmp_dir_path / "prototype_best.csv"
+            options = BenchmarkOptions(
+                prototype_count=int(args.prototype_count),
+                prototype_report_csv=str(tmp_proto_report_csv),
+                tune_size=int(args.tune_size),
+                eval_size=int(args.eval_size),
+                seed=int(args.seed),
+                op_name=str(args.op),
+                dtype=str(args.dtype),
+                warmup=int(args.warmup),
+                repeat=int(args.repeat),
+                bucket_splits=tuple(args.bucket_splits),
+                results_csv=str(tmp_results_csv),
+                reset_results=True,
             )
-            return (
-                f"results_csv={self.main_results_csv},"
-                f"reachable_keys={reachable_keys},"
-                f"unreachable_keys={unreachable_keys},"
-                f"eval_keys={eval_keys}"
-            )
+            benchmark_config: Optional[BenchmarkConfig] = None
+            benchmark_state: Optional[BenchmarkState] = None
+            torch_pool = cf.ThreadPoolExecutor(max_workers=1)
+            torch_future: Optional[cf.Future[tuple[str, list[dict[str, object]]]]] = None
+            torch_launch_t0 = 0.0
 
-        def prototype_stage() -> str:
-            config, state = require_context()
-            detail = run_prototype(config, state)
-            candidate_ids = ",".join(getattr(cfg, "config_id", "?") for cfg in state.candidates)
-            self.logger.info("prototype_candidate_ids=%s", candidate_ids)
-            return detail
+            def require_context() -> tuple[BenchmarkConfig, BenchmarkState]:
+                if benchmark_config is None or benchmark_state is None:
+                    raise RuntimeError("benchmark 尚未初始化")
+                return benchmark_config, benchmark_state
 
-        def bucket_stage() -> str:
-            config, state = require_context()
-            return run_bucket(config, state)
+            def setup_benchmark_stage() -> str:
+                nonlocal benchmark_config
+                nonlocal benchmark_state
+                benchmark_config = build_benchmark_config(options)
+                benchmark_state = build_benchmark_state(options.op_name)
+                op = benchmark_config.op
+                splits = options.bucket_splits
+                reachable_keys = sorted({int(op.eval_key(shape, splits)) for shape in benchmark_config.tune_set})
+                eval_keys = sorted({int(op.eval_key(shape, splits)) for shape in benchmark_config.eval_set})
+                all_keys = []
+                if hasattr(op, "all_bucket_keys"):
+                    try:
+                        all_keys = sorted(int(k) for k in op.all_bucket_keys())
+                    except Exception:  # noqa: BLE001
+                        all_keys = []
+                unreachable_keys = [k for k in all_keys if k not in set(reachable_keys)]
+                self.logger.info(
+                    "bucket_key_info splits=%s reachable=%s unreachable=%s eval=%s",
+                    list(splits),
+                    reachable_keys,
+                    unreachable_keys,
+                    eval_keys,
+                )
+                return (
+                    f"results_csv={tmp_results_csv},"
+                    f"reachable_keys={reachable_keys},"
+                    f"unreachable_keys={unreachable_keys},"
+                    f"eval_keys={eval_keys}"
+                )
 
-        def torch_stage() -> str:
-            nonlocal torch_future
-            nonlocal torch_launch_t0
-            config, state = require_context()
-            if torch_future is not None:
-                detail, rows = torch_future.result()
-                append_records(config.options.results_csv, rows)
-                async_wall_sec = int(time.time() - torch_launch_t0)
-                return f"{detail},async_capture=1,async_wall_sec={async_wall_sec}"
-            return run_torch(config, state)
+            def prototype_stage() -> str:
+                config, state = require_context()
+                detail = run_prototype(config, state)
+                candidate_ids = ",".join(getattr(cfg, "config_id", "?") for cfg in state.candidates)
+                self.logger.info("prototype_candidate_ids=%s", candidate_ids)
+                return detail
 
-        def full_stage() -> str:
-            config, state = require_context()
-            return run_full(config, state)
+            def bucket_stage() -> str:
+                config, state = require_context()
+                return run_bucket(config, state)
 
-        def case_compare_stage() -> str:
-            out_csv, rows = compare_case_runtime(
-                self.main_results_csv,
-                split="eval",
-                out_csv=self.case_compare_csv,
-                allow_mixed_metric=False,
-            )
-            return f"case_compare_csv={out_csv},rows={rows}"
+            def torch_stage() -> str:
+                nonlocal torch_future
+                nonlocal torch_launch_t0
+                config, state = require_context()
+                if torch_future is not None:
+                    detail, rows = torch_future.result()
+                    append_records(config.options.results_csv, rows)
+                    async_wall_sec = int(time.time() - torch_launch_t0)
+                    return f"{detail},async_capture=1,async_wall_sec={async_wall_sec}"
+                return run_torch(config, state)
 
-        def summary_stage() -> str:
-            overall_path, tune_path, bucket_path = summarize(
-                self.main_results_csv,
-                self.run_dir,
-                self.summary_prefix,
-                compare_csv=self.case_compare_csv,
-            )
-            return f"overall={overall_path},tune={tune_path},bucket={bucket_path}"
+            def full_stage() -> str:
+                config, state = require_context()
+                return run_full(config, state)
 
-        try:
-            self.run_stage("setup_benchmark", setup_benchmark_stage)
-            config, state = require_context()
-            torch_launch_t0 = time.time()
-            torch_future = torch_pool.submit(collect_torch_rows, config, state)
-            self.logger.info("START async_stage=benchmark_torch_capture")
-            if int(args.prototype_count) > 0:
-                self.run_stage("prototype", prototype_stage)
-            else:
-                self.logger.info("SKIP stage=prototype reason=prototype_count=0 (no config filtering)")
-            self.run_stage("benchmark_bucket", bucket_stage)
-            self.run_stage("benchmark_full", full_stage)
-            self.run_stage("benchmark_torch", torch_stage)
-            self.run_stage("case_compare", case_compare_stage)
-            self.run_stage("summary", summary_stage)
-        finally:
-            torch_pool.shutdown(wait=False, cancel_futures=False)
+            def case_compare_stage() -> str:
+                out_csv, rows = compare_case_runtime(
+                    tmp_results_csv,
+                    split="eval",
+                    out_csv=self.case_compare_csv,
+                    allow_mixed_metric=False,
+                    print_table=True,
+                )
+                return f"case_compare_csv={out_csv},rows={rows}"
+
+            try:
+                self.run_stage("setup_benchmark", setup_benchmark_stage)
+                config, state = require_context()
+                torch_launch_t0 = time.time()
+                torch_future = torch_pool.submit(collect_torch_rows, config, state)
+                self.logger.info("START async_stage=benchmark_torch_capture")
+                if int(args.prototype_count) > 0:
+                    self.run_stage("prototype", prototype_stage)
+                else:
+                    self.logger.info("SKIP stage=prototype reason=prototype_count=0 (no config filtering)")
+                self.run_stage("benchmark_bucket", bucket_stage)
+                self.run_stage("benchmark_full", full_stage)
+                self.run_stage("benchmark_torch", torch_stage)
+                self.run_stage("case_compare", case_compare_stage)
+            finally:
+                torch_pool.shutdown(wait=False, cancel_futures=False)
 
         total_elapsed_sec = int(time.time() - pipeline_t0)
-        pipeline_end_utc = utc_iso()
-        self.append_stage_time("all_total", pipeline_start_utc, pipeline_end_utc, total_elapsed_sec, "pipeline_total")
         self.logger.info(
             "stage_elapsed_sec=%s",
             ",".join(f"{name}:{sec}" for name, sec in self.stage_elapsed_sec),
         )
         self.logger.info("TOTAL elapsed_sec=%s", total_elapsed_sec)
 
-        self.update_status("done", "all_done")
         self.logger.info("DONE")
         self.logger.info("outputs:")
-        self.logger.info("  - %s", self.proto_report_csv)
-        self.logger.info("  - %s", self.main_results_csv)
         self.logger.info("  - %s", self.case_compare_csv)
-        self.logger.info("  - %s", self.run_dir / f"{self.summary_prefix}_summary_overall.csv")
-        self.logger.info("  - %s", self.run_dir / f"{self.summary_prefix}_summary_tune.csv")
-        self.logger.info("  - %s", self.run_dir / f"{self.summary_prefix}_summary_by_bucket.csv")
 
 
 def main() -> None:
